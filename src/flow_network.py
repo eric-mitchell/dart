@@ -95,12 +95,14 @@ class DART(nn.Module):
             theta = self.net(x).view(-1, self.input_size, 2, *(self.alpha_dim,) * 2)
             alphas = []
             for dim_idx, dim in enumerate(theta.shape[3:]):
-                if idx == 0 or idx == self.input_size - 1 and dim_idx == 0:
+                if (idx == 0 and dim_idx == 0) or (idx == self.input_size - 1 and dim_idx == 0):
                     alphas.append(torch.zeros(theta.shape[0]).long().to(device))
                 else:
                     alphas.append(D.Categorical(torch.ones(dim)/dim).sample((theta.shape[0],)).to(device))
-            import pdb; pdb.set_trace()
-            mu, std = theta[:,idx,0,alphas[0],alphas[1]], theta[:,idx,1,alphas[0],alphas[1]].exp()
+
+            batch_idx = torch.arange(theta.shape[0]).to(theta.device)
+            mu = theta[batch_idx,idx,0,alphas[0],alphas[1]]
+            std = theta[batch_idx,idx,1,alphas[0],alphas[1]].exp()
             x[:,idx] = z[:,idx] * std + mu
 
         return x
@@ -273,12 +275,13 @@ class MAF(nn.Module):
 
 
 def test():
-    from src.flow_network import DART
     x_dim = 784
-    d = DART(x_dim,5,3,alpha_dim=4)
-    x = torch.empty(100,x_dim).normal_()
+    d = DART(x_dim,5,3,alpha_dim=8).to(torch.device('cuda'))
+    x = torch.empty(1000,x_dim).normal_().to(torch.device('cuda'))
+    print('start')
     logpx = d.log_px(x)
-    sample = d.sample(2)
+    print('sample')
+    sample = d.sample(1000, torch.device('cuda'))
     print(f'isnan: {torch.isnan(logpx).any()}')
     print(f'isinf: {torch.isinf(logpx).any()}')
     import pdb; pdb.set_trace()
