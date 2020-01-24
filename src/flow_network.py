@@ -1,7 +1,11 @@
+from typing import Optional, Union, List, Tuple
 import torch
+import torch.distributions as D
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from functools import reduce
+from src.utils import fast_logexpmm
 
 
 class MaskedLinear(nn.Linear):
@@ -12,7 +16,6 @@ class MaskedLinear(nn.Linear):
 
     def forward(self, x):
         return F.linear(x, self.mask * self.weight, self.bias)
-
 
 class PermuteLayer(nn.Module):
     """Layer to permute the ordering of inputs.
@@ -32,6 +35,89 @@ class PermuteLayer(nn.Module):
             inputs.size(0), 1, device=inputs.device)
 
 
+class DART(nn.Module):
+    """DART based on Masked Autoencoder for Distribution Estimation.
+    Gaussian MADE to work with real-valued inputs"""
+    def __init__(self, input_size: int, hidden_size: int, n_hidden: int, alpha_dim: int = 1):
+        super().__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.n_hidden = n_hidden
+        self.alpha_dim = alpha_dim
+        
+        masks = self.create_masks()
+
+        # construct layers: inner, hidden(s), output
+        self.net = [MaskedLinear(self.input_size, self.hidden_size, masks[0])]
+        self.net += [nn.ReLU(inplace=True)]
+        # iterate over number of hidden layers
+        for i in range(self.n_hidden):
+            self.net += [MaskedLinear(
+                self.hidden_size, self.hidden_size, masks[i+1])]
+            self.net += [nn.ReLU(inplace=True)]
+        # last layer doesn't have nonlinear activation
+        self.net += [MaskedLinear(
+            self.hidden_size, self.input_size * 2 * alpha_dim ** 2, masks[-1].repeat(2,1))]
+        self.net = nn.Sequential(*self.net)
+
+    def create_masks(self):
+        """
+        Creates masks for sequential (natural) ordering.
+        """
+        masks = []
+        input_degrees = torch.arange(self.input_size)
+        degrees = [input_degrees] # corresponds to m(k) in paper
+
+        # iterate through every hidden layer
+        for n_h in range(self.n_hidden+1):
+            degrees += [torch.arange(self.hidden_size) % (self.input_size - 1)]
+        degrees += [input_degrees % self.input_size - 1]
+        import pdb; pdb.set_trace()
+        self.m = degrees
+        # output layer mask
+        for (d0, d1) in zip(degrees[:-1], degrees[1:]):
+            masks += [(d1.unsqueeze(-1) >= d0.unsqueeze(0)).float()]
+        import pdb; pdb.set_trace()
+
+        return masks
+
+    def forward(self, z: torch.tensor = None, device: str = 'cpu'):
+        """
+        Run the forward mapping (z -> x) for MAF through one MADE block.
+        :param z: Input noise of size (batch_size, self.input_size)
+        :return: (x, log_det). log_det should be 1-D (batch_dim,)
+        """
+        if z is None:
+            z = torch.empty(self.input_size).to(device).normal_()
+        x = torch.zeros_like(z)
+    
+        # YOUR CODE STARTS HERE
+        for idx in range(self.input_size):
+            theta = self.net(x).view(-1, self.input_size * 2, self.alpha_dim, self.alpha_dim)
+            mu, std = theta[:,idx], theta[:,self.input_size + idx].exp()
+            x[:,idx] = z[:,idx] * std + mu
+        log_det = None
+        # YOUR CODE ENDS HERE
+
+        return x, log_det
+
+    def log_px(self, x):
+        """
+        Evaluate the log likelihood of a batch of samples.
+        """
+        
+        theta = self.net(x).view(-1, 2, self.input_size, *(self.alpha_dim,) * 2)
+        mu, alpha = theta[:,0], theta[:,1]
+        d = D.Normal(mu, alpha.exp())
+        log_px_matrices = d.log_prob(x.unsqueeze(-1).unsqueeze(-1))
+        inner_matrices = list(log_px_matrices[:,1:-1].transpose(0,1))
+        inner_matrix_product = reduce(fast_logexpmm, inner_matrices)
+        first = log_px_matrices[:,0,0:1]
+        last = log_px_matrices[:,-1,-1:]
+        log_px = fast_logexpmm(first, fast_logexpmm(inner_matrix_product, last))
+        return log_px
+
+
 class MADE(nn.Module):
     """Masked Autoencoder for Distribution Estimation.
     https://arxiv.org/abs/1502.03509
@@ -43,7 +129,7 @@ class MADE(nn.Module):
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.n_hidden = n_hidden
-
+        
         masks = self.create_masks()
 
         # construct layers: inner, hidden(s), output
