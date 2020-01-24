@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from functools import reduce
-from src.utils import fast_logexpmm
+from src.utils import stable_logexpmm, fast_logexpmm
 
 
 class MaskedLinear(nn.Linear):
@@ -57,7 +57,9 @@ class DART(nn.Module):
             self.net += [nn.ReLU(inplace=True)]
         # last layer doesn't have nonlinear activation
         self.net += [MaskedLinear(
-            self.hidden_size, self.input_size * 2 * alpha_dim ** 2, masks[-1].repeat(2,1))]
+            self.hidden_size, self.input_size * 2 * alpha_dim ** 2,
+            masks[-1].repeat(1,2 * alpha_dim ** 2).view(-1,self.hidden_size))]
+
         self.net = nn.Sequential(*self.net)
 
     def create_masks(self):
@@ -72,49 +74,57 @@ class DART(nn.Module):
         for n_h in range(self.n_hidden+1):
             degrees += [torch.arange(self.hidden_size) % (self.input_size - 1)]
         degrees += [input_degrees % self.input_size - 1]
-        import pdb; pdb.set_trace()
+
         self.m = degrees
         # output layer mask
         for (d0, d1) in zip(degrees[:-1], degrees[1:]):
             masks += [(d1.unsqueeze(-1) >= d0.unsqueeze(0)).float()]
-        import pdb; pdb.set_trace()
 
         return masks
 
-    def forward(self, z: torch.tensor = None, device: str = 'cpu'):
+    def sample(self, n: int, device: str = 'cpu'):
         """
         Run the forward mapping (z -> x) for MAF through one MADE block.
         :param z: Input noise of size (batch_size, self.input_size)
         :return: (x, log_det). log_det should be 1-D (batch_dim,)
         """
-        if z is None:
-            z = torch.empty(self.input_size).to(device).normal_()
+        z = torch.empty(n, self.input_size).to(device).normal_()
         x = torch.zeros_like(z)
     
-        # YOUR CODE STARTS HERE
         for idx in range(self.input_size):
-            theta = self.net(x).view(-1, self.input_size * 2, self.alpha_dim, self.alpha_dim)
-            mu, std = theta[:,idx], theta[:,self.input_size + idx].exp()
+            theta = self.net(x).view(-1, self.input_size, 2, *(self.alpha_dim,) * 2)
+            alphas = []
+            for dim_idx, dim in enumerate(theta.shape[3:]):
+                if idx == 0 or idx == self.input_size - 1 and dim_idx == 0:
+                    alphas.append(torch.zeros(theta.shape[0]).long().to(device))
+                else:
+                    alphas.append(D.Categorical(torch.ones(dim)/dim).sample((theta.shape[0],)).to(device))
+            import pdb; pdb.set_trace()
+            mu, std = theta[:,idx,0,alphas[0],alphas[1]], theta[:,idx,1,alphas[0],alphas[1]].exp()
             x[:,idx] = z[:,idx] * std + mu
-        log_det = None
-        # YOUR CODE ENDS HERE
 
-        return x, log_det
+        return x
 
     def log_px(self, x):
         """
         Evaluate the log likelihood of a batch of samples.
         """
         
-        theta = self.net(x).view(-1, 2, self.input_size, *(self.alpha_dim,) * 2)
-        mu, alpha = theta[:,0], theta[:,1]
+        theta = self.net(x).view(-1, self.input_size, 2, *(self.alpha_dim,) * 2)
+        mu, alpha = theta[:,:,0], theta[:,:,1]
         d = D.Normal(mu, alpha.exp())
-        log_px_matrices = d.log_prob(x.unsqueeze(-1).unsqueeze(-1))
+        log_p_alpha = torch.tensor(self.alpha_dim).float().log().to(mu.device)
+        log_px_matrices = d.log_prob(x.unsqueeze(-1).unsqueeze(-1)) - log_p_alpha
         inner_matrices = list(log_px_matrices[:,1:-1].transpose(0,1))
-        inner_matrix_product = reduce(fast_logexpmm, inner_matrices)
+        if len(inner_matrices) > 1:
+            inner_matrix_product = reduce(fast_logexpmm, inner_matrices)
+        else:
+            inner_matrix_product = inner_matrices
+
         first = log_px_matrices[:,0,0:1]
-        last = log_px_matrices[:,-1,-1:]
+        last = log_px_matrices[:,-1,:,0:1]
         log_px = fast_logexpmm(first, fast_logexpmm(inner_matrix_product, last))
+
         return log_px
 
 
@@ -260,3 +270,18 @@ class MAF(nn.Module):
             x_sample = x_sample.cpu().data.numpy()
 
         return x_sample
+
+
+def test():
+    from src.flow_network import DART
+    x_dim = 784
+    d = DART(x_dim,5,3,alpha_dim=4)
+    x = torch.empty(100,x_dim).normal_()
+    logpx = d.log_px(x)
+    sample = d.sample(2)
+    print(f'isnan: {torch.isnan(logpx).any()}')
+    print(f'isinf: {torch.isinf(logpx).any()}')
+    import pdb; pdb.set_trace()
+    
+if __name__ == '__main__':
+    test()

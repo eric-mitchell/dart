@@ -3,29 +3,38 @@ import torch
 import time
 
 
-def logexpmm(A, B):
+def logexpmm(A, B, time_=False):
     start = time.time()
     result = (A.exp() @ B.exp()).log()
 
     return result, time.time() - start
 
 
-def fast_logexpmm(A, B):
-    start = time.time()
-    
-    max_A = A.max()
-    max_B = B.max()
+def fast_logexpmm(A, B, time_=False):
+    if time_:
+        start = time.time()
+
+    max_A = A.max(-1, keepdim=True).values.max(-2, keepdim=True).values
+    max_B = B.max(-1, keepdim=True).values.max(-2, keepdim=True).values
 
     C = (A - max_A).exp().bmm((B - max_B).exp())
+
+    if C.min() <= 0:
+        print('Taking log of zero...')
+        import pdb; pdb.set_trace()
+
     C = C.log()
     C += max_A + max_B
-    return C, time.time() - start
+    if time_:
+        return C, time.time() - start
+    else:
+        return C
 
-
-def stable_logexpmm(A, B):
+def stable_logexpmm(A, B, time_=False):
     assert B.shape[-2] == A.shape[-1]
 
-    start = time.time()
+    if time_:
+        start = time.time()
     
     input_dim = B.shape[-1]
     output_dim = A.shape[-2]
@@ -43,8 +52,11 @@ def stable_logexpmm(A, B):
     values = presum_values.sum(-2)
     result = values.log() + max_logit.squeeze(-2)
 
-    return result, time.time() - start
-
+    if time_:
+        return result, time.time() - start
+    else:
+        return result
+    
 
 def test(args: argparse.Namespace):
     if args.seed is not None:
@@ -55,8 +67,8 @@ def test(args: argparse.Namespace):
     A = torch.empty(2,args.dim, args.dim, device=args.device).uniform_() * args.multiplier
     B = torch.empty(2,args.dim, args.dim, device=args.device).uniform_() * args.multiplier
 
-    C, time = logexpmm(A,B)
-    C_stable, time_ = stable_logexpmm(A,B)
+    C, time = logexpmm(A,B, time_=True)
+    C_stable, time_ = stable_logexpmm(A,B, time_=True)
 
     valid = ((C - C_stable).abs() < 1e-5).all()
     if args.print:
