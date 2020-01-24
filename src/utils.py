@@ -10,6 +10,18 @@ def logexpmm(A, B):
     return result, time.time() - start
 
 
+def fast_logexpmm(A, B):
+    start = time.time()
+    
+    max_A = A.max()
+    max_B = B.max()
+
+    C = (A - max_A).exp().bmm((B - max_B).exp())
+    C = C.log()
+    C += max_A + max_B
+    return C, time.time() - start
+
+
 def stable_logexpmm(A, B):
     assert B.shape[-2] == A.shape[-1]
 
@@ -55,7 +67,7 @@ def test(args: argparse.Namespace):
     print(valid)
     if not valid:
         import pdb; pdb.set_trace()
-    
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
