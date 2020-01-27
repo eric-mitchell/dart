@@ -13,6 +13,7 @@ class MaskedLinear(nn.Linear):
     def __init__(self, input_size, output_size, mask):
         super().__init__(input_size, output_size)
         self.register_buffer('mask', mask)
+        #self.weight[:]=(2/(input_size + output_size))
 
     def forward(self, x):
         return F.linear(x, self.mask * self.weight, self.bias)
@@ -44,7 +45,7 @@ class DART(nn.Module):
         self.hidden_size = hidden_size
         self.n_hidden = n_hidden
         self.alpha_dim = alpha_dim
-        
+
         masks = self.create_masks()
 
         # construct layers: inner, hidden(s), output
@@ -82,52 +83,60 @@ class DART(nn.Module):
 
         return masks
 
+    def forward(self, x):
+        return self.log_prob(x)
+    
     def sample(self, n: int, device: str = 'cpu'):
         """
-        Run the forward mapping (z -> x) for MAF through one MADE block.
-        :param z: Input noise of size (batch_size, self.input_size)
-        :return: (x, log_det). log_det should be 1-D (batch_dim,)
+        Sample n samples from the model.
         """
-        z = torch.empty(n, self.input_size).to(device).normal_()
-        x = torch.zeros_like(z)
-    
-        for idx in range(self.input_size):
-            theta = self.net(x).view(-1, self.input_size, 2, *(self.alpha_dim,) * 2)
-            alphas = []
-            for dim_idx, dim in enumerate(theta.shape[3:]):
-                if (idx == 0 and dim_idx == 0) or (idx == self.input_size - 1 and dim_idx == 0):
-                    alphas.append(torch.zeros(theta.shape[0]).long().to(device))
-                else:
-                    alphas.append(D.Categorical(torch.ones(dim)/dim).sample((theta.shape[0],)).to(device))
+        simple_alpha = True
+        with torch.no_grad():
+            z = torch.empty(n, self.input_size).to(device).normal_()
+            x = torch.zeros_like(z)
 
-            batch_idx = torch.arange(theta.shape[0]).to(theta.device)
-            mu = theta[batch_idx,idx,0,alphas[0],alphas[1]]
-            std = theta[batch_idx,idx,1,alphas[0],alphas[1]].exp()
-            x[:,idx] = z[:,idx] * std + mu
+            for idx in range(self.input_size):
+                theta = self.net(x).view(-1, self.input_size, 2, *(self.alpha_dim,) * 2)
+                if simple_alpha:
+                    alphas = [0] * 2
+                else:
+                    for dim_idx, dim in enumerate(theta.shape[3:]):
+                        if (idx == 0 and dim_idx == 0) or (idx == self.input_size - 1 and dim_idx == 0):
+                            alphas.append(torch.zeros(theta.shape[0]).long().to(device))
+                        else:
+                            alphas.append(D.Categorical(torch.ones(dim)/dim).sample((theta.shape[0],)).to(device))
+
+                batch_idx = torch.arange(theta.shape[0]).to(theta.device)
+                mu = theta[batch_idx,idx,0,alphas[0],alphas[1]]
+                std = theta[batch_idx,idx,1,alphas[0],alphas[1]].exp()
+                x[:,idx] = z[:,idx] * std + mu
 
         return x
 
-    def log_px(self, x):
+    def log_prob(self, x, pause: bool = False):
         """
         Evaluate the log likelihood of a batch of samples.
         """
-        
+        if pause:
+            import pdb; pdb.set_trace()
+
         theta = self.net(x).view(-1, self.input_size, 2, *(self.alpha_dim,) * 2)
-        mu, alpha = theta[:,:,0], theta[:,:,1]
-        d = D.Normal(mu, alpha.exp())
-        log_p_alpha = torch.tensor(self.alpha_dim).float().log().to(mu.device)
-        log_px_matrices = d.log_prob(x.unsqueeze(-1).unsqueeze(-1)) - log_p_alpha
+        mu, std = theta[:,:,0], theta[:,:,1].exp()
+        d = D.Normal(mu, std)
+        log_p_alpha = torch.tensor(1./self.alpha_dim).float().log().to(mu.device)
+        log_px_matrices = d.log_prob(x.unsqueeze(-1).unsqueeze(-1)) + log_p_alpha
+
         inner_matrices = list(log_px_matrices[:,1:-1].transpose(0,1))
         if len(inner_matrices) > 1:
             inner_matrix_product = reduce(fast_logexpmm, inner_matrices)
         else:
-            inner_matrix_product = inner_matrices
+            inner_matrix_product = inner_matrices[0]
 
         first = log_px_matrices[:,0,0:1]
         last = log_px_matrices[:,-1,:,0:1]
         log_px = fast_logexpmm(first, fast_logexpmm(inner_matrix_product, last))
 
-        return log_px
+        return log_px, (mu, std)
 
 
 class MADE(nn.Module):
@@ -274,17 +283,62 @@ class MAF(nn.Module):
         return x_sample
 
 
+def test_grad():
+    # run a quick and dirty test for the autoregressive property
+    D = 2
+    rng = np.random.RandomState(14)
+    x = (rng.rand(1, D) > 0.5).astype(np.float32)
+
+    configs = [
+        (D, 4, 0, False),                 # test various hidden sizes
+    ]
+
+    for nin, hiddens, n_hidden, natural_ordering in configs:
+        print("checking nin %d, hiddens %s, nout %d, natural %s" %
+              (nin, hiddens, n_hidden, natural_ordering))
+        model = DART(nin, hiddens, n_hidden)
+
+        # run backpropagation for each dimension to compute what other
+        # dimensions it depends on.
+        res = []
+        for k in range(nin):
+            xtr = torch.from_numpy(x)
+            xtr.requires_grad=True
+            xtrhat = model(xtr)
+
+            loss = xtrhat[0,k]
+            loss.backward()
+
+            import pdb; pdb.set_trace()
+            depends = (xtr.grad[0].numpy() != 0).astype(np.uint8)
+            depends_ix = list(np.where(depends)[0])
+            isok = k % nin not in depends_ix
+
+            res.append((len(depends_ix), k, depends_ix, isok))
+
+            # pretty print the dependencies
+            res.sort()
+
+    for nl, k, ix, isok in res:
+        print("output %2d depends on inputs: %30s : %s" % (k, ix, "OK" if isok else "NOTOK"))
+            
+            
 def test():
-    x_dim = 784
-    d = DART(x_dim,5,3,alpha_dim=8).to(torch.device('cuda'))
-    x = torch.empty(1000,x_dim).normal_().to(torch.device('cuda'))
+    x_dim = 4
+    d = DART(x_dim,2048,2,alpha_dim=1).to(torch.device('cuda'))
+    #x = torch.empty(1000,x_dim).normal_().to(torch.device('cuda'))
+    #x = torch.stack((torch.arange(3), torch.arange(3))).float().to(torch.device('cuda')) * 10000000
+    x = torch.eye(x_dim).float().to(torch.device('cuda'))
+    #x = torch.cat((x, torch.tensor([[1.,1.,0],[1.,1.,1.]]).to(torch.device('cuda'))))
+    #x[x>0] = torch.tensor(0.).log().to(torch.device('cuda'))
+    x[x>0] = 1e10
     print('start')
-    logpx = d.log_px(x)
+    logpx, matrices = d(x)
     print('sample')
-    sample = d.sample(1000, torch.device('cuda'))
+    sample = d.sample(10, torch.device('cuda'))
     print(f'isnan: {torch.isnan(logpx).any()}')
     print(f'isinf: {torch.isinf(logpx).any()}')
     import pdb; pdb.set_trace()
     
 if __name__ == '__main__':
-    test()
+    test_grad()

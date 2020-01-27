@@ -5,17 +5,21 @@ import time
 
 def logexpmm(A, B, time_=False):
     start = time.time()
-    result = (A.exp() @ B.exp()).log()
+    result = (A.exp().bmm(B.exp())).log()
 
     return result, time.time() - start
 
 
-def fast_logexpmm(A, B, time_=False):
+def fast_logexpmm(A, B, time_=False, stable: bool = True):
     if time_:
         start = time.time()
 
-    max_A = A.max(-1, keepdim=True).values.max(-2, keepdim=True).values
-    max_B = B.max(-1, keepdim=True).values.max(-2, keepdim=True).values
+    if stable:
+        max_A = A.max(-1, keepdim=True).values
+        max_B = B.max(-2, keepdim=True).values
+    else:
+        max_A = A.max(-1, keepdim=True).values.max(-2, keepdim=True).values
+        max_B = B.max(-1, keepdim=True).values.max(-2, keepdim=True).values
 
     C = (A - max_A).exp().bmm((B - max_B).exp())
 
@@ -58,26 +62,69 @@ def stable_logexpmm(A, B, time_=False):
         return result
     
 
+def unstable_inputs(args: argparse.Namespace):
+    A = [[-232.8080, -232.8080, -339.6227, -232.8080, -233.7948, -232.8080,
+          -232.8080, -233.4026],
+         [-232.8129, -232.8129, -339.6276, -232.8129, -233.7997, -232.8129,
+          -232.8129, -233.4075],
+         [-232.8088, -232.8088, -339.6234, -232.8088, -233.7955, -232.8088,
+          -232.8088, -233.4034],
+         [-232.8114, -232.8114, -339.6261, -232.8114, -233.7982, -232.8114,
+          -232.8114, -233.4060],
+         [-232.8115, -232.8115, -339.6262, -232.8115, -233.7982, -232.8115,
+          -232.8115, -233.4061],
+         [-232.8137, -232.8137, -339.6284, -232.8137, -233.8005, -232.8137,
+          -232.8137, -233.4083],
+         [-232.8083, -232.8083, -339.6230, -232.8083, -233.7951, -232.8083,
+          -232.8083, -233.4029],
+         [-232.8084, -232.8084, -339.6231, -232.8084, -233.7952, -232.8084,
+          -232.8084, -233.4030]]
+    B = [[-105.8763,   -2.0794, -111.5282,   -2.0794, -109.5053, -102.4518,
+          -120.6127, -121.5034],
+         [-124.8149,   -2.0794, -105.6063,   -2.0794, -125.8682, -140.7194,
+          -114.3827, -131.6997],
+         [  -2.0794,   -2.0794,   -2.0794,   -2.0794,   -2.0794,   -2.0794,
+            -2.0794,   -2.0794],
+         [-140.2136,   -2.0794, -113.9071,   -2.0794, -127.7903, -117.2482,
+          -122.3694, -129.3651],
+         [ -75.4844,   -2.0794,   -2.0794,   -2.0794, -123.6696,   -2.0794,
+           -2.0794,   -2.0794],
+         [-133.8385,  -97.2946, -117.7260,   -2.0794, -149.4694, -138.0431,
+          -123.8264, -138.2962],
+         [-133.4516,  -81.5486, -134.3775,   -2.0794, -155.6442, -123.6420,
+          -136.6097, -122.8662],
+         [ -73.7120,   -2.0794,   -2.0794,   -2.0794, -108.0346,   -2.0794,
+           -77.2179,  -89.1178]]
+    return torch.tensor(A).to(args.device).unsqueeze(0), torch.tensor(B).to(args.device).unsqueeze(0)
+
+
 def test(args: argparse.Namespace):
     if args.seed is not None:
         torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    A = torch.empty(2,args.dim, args.dim, device=args.device).uniform_() * args.multiplier
-    B = torch.empty(2,args.dim, args.dim, device=args.device).uniform_() * args.multiplier
+    if args.unstable:
+        A, B = unstable_inputs(args)
+    else:
+        A = torch.empty(2,args.dim, args.dim, device=args.device).uniform_() * args.multiplier
+        B = torch.empty(2,args.dim, args.dim, device=args.device).uniform_() * args.multiplier
 
     C, time = logexpmm(A,B, time_=True)
+    C_fast, time_ = fast_logexpmm(A,B, time_=True)
     C_stable, time_ = stable_logexpmm(A,B, time_=True)
-
-    valid = ((C - C_stable).abs() < 1e-5).all()
+    
+    valid_fast = ((C - C_fast).abs() < 1e-5).all()
+    valid_stable = ((C - C_stable).abs() < 1e-5).all()
     if args.print:
-        #print(C)
-        #print(C_stable)
+        print(C)
+        print(C_fast)
+        print(C_stable)
         print(time, time_)
+        print(C - C_fast)
         print(C - C_stable)
-    print(valid)
-    if not valid:
+    print(f'valid_fast: {valid_fast}, valid_stable: {valid_stable}')
+    if not valid_fast or not valid_stable:
         import pdb; pdb.set_trace()
 
 
@@ -88,5 +135,6 @@ if __name__ == '__main__':
     parser.add_argument('--dim', type=int, default=100)
     parser.add_argument('--multiplier', type=float, default=1)
     parser.add_argument('--print', action='store_true')
+    parser.add_argument('--unstable', action='store_true')
     args = parser.parse_args()
     test(args)
