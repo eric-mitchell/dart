@@ -41,10 +41,15 @@ class DART(nn.Module):
             self.net += [nn.ReLU(inplace=True)]
         # last layer doesn't have nonlinear activation
 
-        distribution_param_count = 1 if binary else 2 # 1 for Bernoulli, 2 for Gaussian
-        self.net += [MaskedLinear(
-            self.hidden_size, self.input_size * distribution_param_count * alpha_dim ** 2,
-            masks[-1].repeat(1,distribution_param_count * alpha_dim ** 2).view(-1,self.hidden_size))]
+        self.distribution_param_count = 1 if binary else 2 # 1 for Bernoulli, 2 for Gaussian
+        output_values_per_dim = self.distribution_param_count * alpha_dim ** 2
+        self.net += [MaskedLinear(self.hidden_size,
+                                  self.input_size * output_values_per_dim,
+                                  masks[-1].repeat(1,output_values_per_dim).view(-1,self.hidden_size)
+        )]
+
+        log_p_alpha = torch.ones(1, self.input_size - 1, 1, alpha_dim) / float(alpha_dim)
+        self.unnormalized_log_p_alpha = torch.nn.Parameter(log_p_alpha.log())
 
         self.net = nn.Sequential(*self.net)
 
@@ -68,42 +73,48 @@ class DART(nn.Module):
 
         return masks
 
+    def _log_p_alpha(self):
+        u_log_p = self.unnormalized_log_p_alpha
+        max_u = u_log_p.max(-1, keepdim=True).values
+        logsumexp = (u_log_p - max_u).exp().sum(-1, keepdim=True).log()
+        log_p = u_log_p - (max_u + logsumexp)
+
+        assert ((log_p.exp().sum(-1) - 1).abs() < 1e-6).all()
+        return log_p
+
     def forward(self, x):
         return self.log_prob(x)
-    
+
     def sample(self, n: int, device: str = 'cpu'):
         """
         Sample n samples from the model.
         """
-        simple_alpha = True
         with torch.no_grad():
             z = torch.empty(n, self.input_size).to(device).normal_()
             x = torch.zeros_like(z)
 
+            alpha_distribution = D.Categorical(logits=self._log_p_alpha().view(self.input_size - 1, self.alpha_dim))
+            zeros = torch.zeros(n,1).long().to(device)
+            alphas = torch.cat((zeros, alpha_distribution.sample((n,)), zeros), 1)
+
             for idx in range(self.input_size):
+                alpha_row, alpha_column = alphas[:,idx], alphas[:,idx+1]
                 if self.binary:
                     theta = self.net(x).view(-1, self.input_size, *(self.alpha_dim,) * 2)
                 else:
                     theta = self.net(x).view(-1, self.input_size, 2, *(self.alpha_dim,) * 2)
 
-                if simple_alpha:
-                    alphas = [0] * 2
-                else:
-                    for dim_idx, dim in enumerate(theta.shape[3:]):
-                        if (idx == 0 and dim_idx == 0) or (idx == self.input_size - 1 and dim_idx == 0):
-                            alphas.append(torch.zeros(theta.shape[0]).long().to(device))
-                        else:
-                            alphas.append(D.Categorical(torch.ones(dim)/dim).sample((theta.shape[0],)).to(device))
-
                 batch_idx = torch.arange(theta.shape[0]).to(theta.device)
                 if self.binary:
-                    beta_logits = theta[batch_idx,idx,alphas[0],alphas[1]]
+                    beta_logits = theta[batch_idx,idx,alpha_row,alpha_column]
                     d = D.Bernoulli(logits=beta_logits)
                     x[:,idx] = d.sample()
                 else:
-                    mu = theta[batch_idx,idx,0,alphas[0],alphas[1]]
-                    std = theta[batch_idx,idx,1,alphas[0],alphas[1]].exp()
-                    x[:,idx] = z[:,idx] * std + mu
+                    mu = theta[batch_idx,idx,0,alpha_row,alpha_column]
+                    std = theta[batch_idx,idx,1,alpha_row,alpha_column].exp() + 1e-2
+                    d = D.Normal(mu, std)
+                    #x[:,idx] = z[:,idx] * std + mu
+                    x[:,idx] = d.sample()
 
         return x
 
@@ -119,19 +130,19 @@ class DART(nn.Module):
             d = D.Bernoulli(logits=theta)
         else:
             theta = self.net(x).view(-1, self.input_size, 2, *(self.alpha_dim,) * 2)
-            mu, std = theta[:,:,0], theta[:,:,1].exp()
+            mu, std = theta[:,:,0], theta[:,:,1].exp() + 1e-2
             d = D.Normal(mu, std)
 
-        log_p_alpha = torch.tensor(1./self.alpha_dim).float().log().to(theta.device)
-        log_px_matrices = d.log_prob(x.unsqueeze(-1).unsqueeze(-1)) + log_p_alpha # we need the joint to marginalize, not conditional on alpha
+        log_px_matrices = d.log_prob(x.unsqueeze(-1).unsqueeze(-1))
+        joint_matrices = log_px_matrices[:,:-1] + self._log_p_alpha()
 
-        inner_matrices = list(log_px_matrices[:,1:-1].transpose(0,1))
+        inner_matrices = list(joint_matrices[:,1:].transpose(0,1))
         if len(inner_matrices) > 1:
             inner_matrix_product = reduce(stable_logexpmm, inner_matrices)
         else:
             inner_matrix_product = inner_matrices[0]
 
-        first = log_px_matrices[:,0,0:1]
+        first = joint_matrices[:,0,0:1]
         last = log_px_matrices[:,-1,:,0:1]
         log_px = stable_logexpmm(first, stable_logexpmm(inner_matrix_product, last))
 

@@ -8,7 +8,7 @@ def get_args():
     parser.add_argument('--n_hidden', type=int, default=3)
     parser.add_argument('--alpha_dim', type=int, default=1)
     parser.add_argument('--interval', type=int, default=100)
-    parser.add_argument('--n_sample', type=int, default=8)
+    parser.add_argument('--n_sample', type=int, default=16)
     parser.add_argument('--epochs', type=int, default=1000)
     parser.add_argument('--device', type=str, default='cpu')
     parser.add_argument('--batch_size', type=int, default=32)
