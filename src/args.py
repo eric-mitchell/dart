@@ -2,12 +2,15 @@ import argparse
 
 def get_args():
     parser = argparse.ArgumentParser()
+    parser.add_argument('--archive', type=str, default=None)
+    parser.add_argument('--debug', action='store_true')
+    parser.add_argument('--profile', action='store_true')
     parser.add_argument('--binary', action='store_true')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--hidden_size', type=int, default=4096)
     parser.add_argument('--n_hidden', type=int, default=3)
     parser.add_argument('--alpha_dim', type=int, default=1)
-    parser.add_argument('--interval', type=int, default=100)
+    parser.add_argument('--interval', type=int, default=1000)
     parser.add_argument('--n_sample', type=int, default=16)
     parser.add_argument('--epochs', type=int, default=1000)
     parser.add_argument('--device', type=str, default='cpu')

@@ -37,7 +37,12 @@ def get_mnist_data(device, batch_size: int = 128, binary: bool = False):
     if binary:
         X_train = (X_train > 0.5).float()
         X_test = (X_test > 0.5).float()
-    
+
+    assert X_train.min() == 0
+    assert X_train.max() == 1
+    assert X_test.min() == 0
+    assert X_test.max() == 1
+
     return train_loader, (X_test, y_test)
 
 
@@ -62,6 +67,8 @@ def train(args: argparse.Namespace, model: DART):
         
     for epoch in range(args.epochs):
         for t, (X, _) in enumerate(train_loader):
+            if args.debug:
+                import pdb; pdb.set_trace()
             X = X.view(X.shape[0], -1).to(device)
             step = epoch * (len(train_loader.dataset) / args.batch_size) + t
             log_px, matrices = model.log_prob(X)
@@ -71,7 +78,7 @@ def train(args: argparse.Namespace, model: DART):
             (-log_px).mean().backward()
             optimizer.step()
             optimizer.zero_grad()
-            
+
             writer.add_scalar('Train_Likelihood', log_px.mean().item(), step)
             if t % args.interval == 0:
                 test_data = random_test_sample().to(device)
@@ -92,7 +99,7 @@ def train(args: argparse.Namespace, model: DART):
                 torch.save({
                     'model': model.state_dict(),
                     'opt': optimizer.state_dict()
-                }, f'{log_path(args)}/archive.pt')
+                }, f'{log_path(args)}/archive_.pt')
 
 
 def run(args: argparse.Namespace):
@@ -103,6 +110,9 @@ def run(args: argparse.Namespace):
     torch.cuda.manual_seed(seed)
 
     dart = DART(784, args.hidden_size, args.n_hidden, args.alpha_dim, args.binary)
+
+    if args.archive is not None:
+        dart.load_state_dict(torch.load(args.archive)['model'])
 
     train(args, dart)
 

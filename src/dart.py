@@ -111,9 +111,8 @@ class DART(nn.Module):
                     x[:,idx] = d.sample()
                 else:
                     mu = theta[batch_idx,idx,0,alpha_row,alpha_column]
-                    std = theta[batch_idx,idx,1,alpha_row,alpha_column].exp() + 1e-2
+                    std = theta[batch_idx,idx,1,alpha_row,alpha_column].exp()
                     d = D.Normal(mu, std)
-                    #x[:,idx] = z[:,idx] * std + mu
                     x[:,idx] = d.sample()
 
         return x
@@ -130,7 +129,7 @@ class DART(nn.Module):
             d = D.Bernoulli(logits=theta)
         else:
             theta = self.net(x).view(-1, self.input_size, 2, *(self.alpha_dim,) * 2)
-            mu, std = theta[:,:,0], theta[:,:,1].exp() + 1e-2
+            mu, std = theta[:,:,0], theta[:,:,1].exp()
             d = D.Normal(mu, std)
 
         log_px_matrices = d.log_prob(x.unsqueeze(-1).unsqueeze(-1))
