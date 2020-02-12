@@ -102,15 +102,10 @@ class DART(nn.Module):
             z = torch.empty(n, self.input_size).to(device).normal_()
             x = torch.zeros_like(z)
 
-            '''
-            for idx in range(self.input_size):
-                x = x.clamp(min=0, max=1)
-                theta = self.net(x).view(-1, self.input_size, self.distribution_param_count)
-                mu = theta[:,idx,0]
-                std = theta[:,idx,1].exp()
-                d = D.Normal(mu, std)
-                x[:,idx] = d.sample()
-            '''
+            # Sample random latent "alpha" values
+            # alpha_0 and alpha_n are fixed to have only one possible value, so we hard-code their indices to be zero here
+            # the rest are sampled from our learned mixture prior defined by the logits returned by self._log_p_alpha()
+            # we use these indices in the inner loop to pick which conditional to use at each step
             alpha_distribution = D.Categorical(logits=self._log_p_alpha().view(self.input_size - 1, self.alpha_dim))
             zeros = torch.zeros(n,1).long().to(device)
             alphas = torch.cat((zeros, alpha_distribution.sample((n,)), zeros), 1)
@@ -133,6 +128,7 @@ class DART(nn.Module):
                     std = theta[batch_idx,idx,1,alpha_row,alpha_column].exp()
                     d = D.Normal(mu, std)
                     x[:,idx] = d.sample().clamp(min=0,max=1)
+
         return x, theta.unsqueeze(-1).unsqueeze(-1)
 
     def log_prob(self, x, pause: bool = False):
@@ -151,11 +147,14 @@ class DART(nn.Module):
             mu, std = theta[:,:,0], theta[:,:,1].exp()
             d = D.Normal(mu, std)
 
+        # Conditional probability matrices log p(x_i | alpha_{i-1}, alpha_i, x_{<i})
         log_px_matrices = d.log_prob(x.unsqueeze(-1).unsqueeze(-1))
 
         if self.alpha_dim > 1:
+            # Multiply with the alpha marginals so that matrix multiplication corresponds to summing out alpha
             joint_matrices = log_px_matrices[:,:-1] + self._log_p_alpha()
 
+            # Reduce all of the "inner" matrices (all except x_1 and x_n)
             inner_matrices = joint_matrices[:,1:].transpose(0,1)
             if len(inner_matrices) > 1:
                 inner_matrix_product = reduce(stable_logexpmm, list(inner_matrices))
