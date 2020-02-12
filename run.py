@@ -5,45 +5,12 @@ from torchvision import datasets, transforms
 import argparse
 import os
 import random
+import time
+
 
 from src.args import get_args
 from src.dart import DART
-
-
-def get_mnist_data(device, batch_size: int = 128, binary: bool = False):
-    preprocess = transforms.ToTensor()
-    if binary:
-        preprocess = transforms.Compose([
-            preprocess,
-            lambda x: x > 0.5,
-            lambda x: x.float()
-        ])
-
-    train_loader = torch.utils.data.DataLoader(
-        datasets.MNIST('data', train=True, download=True, transform=preprocess),
-        batch_size=batch_size,  # Using a weird batch size to prevent students from hard-coding
-        shuffle=True)
-    test_loader = torch.utils.data.DataLoader(
-        datasets.MNIST('data', train=False, download=True, transform=preprocess),
-        batch_size=batch_size,
-        shuffle=True)
-
-    # Create pre-processed training and test sets
-    X_train = train_loader.dataset.train_data.to(device).reshape(-1, 784).float() / 255
-    y_train = train_loader.dataset.train_labels.to(device)
-    X_test = test_loader.dataset.test_data.to(device).reshape(-1, 784).float() / 255
-    y_test = test_loader.dataset.test_labels.to(device)
-
-    if binary:
-        X_train = (X_train > 0.5).float()
-        X_test = (X_test > 0.5).float()
-
-    assert X_train.min() == 0
-    assert X_train.max() == 1
-    assert X_test.min() == 0
-    assert X_test.max() == 1
-
-    return train_loader, (X_test, y_test)
+from src.data import get_mnist_data
 
 
 def log_path(args: argparse.Namespace):
@@ -53,10 +20,9 @@ def log_path(args: argparse.Namespace):
 def train(args: argparse.Namespace, model: DART):
     device = torch.device(args.device)
     model.to(device)
-    
-    train_loader, (X_test, y_test) = get_mnist_data(args.device, args.batch_size, args.binary)
-    def random_test_sample(n: int = 100):
-        return X_test[torch.randperm(X_test.shape[0])[:n]].view(n,-1)
+
+    train_loader, test_loader = get_mnist_data(args.device, args.distribution,
+                                               args.batch_size, args.test_batch_size)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
@@ -64,42 +30,58 @@ def train(args: argparse.Namespace, model: DART):
         os.makedirs(log_path(args))
 
     writer = SummaryWriter(log_path(args))
-        
+
     for epoch in range(args.epochs):
+        start = time.time()
         for t, (X, _) in enumerate(train_loader):
-            if args.debug:
-                import pdb; pdb.set_trace()
+            avg_time = (time.time() - start) / (t+1)
+
             X = X.view(X.shape[0], -1).to(device)
             step = epoch * (len(train_loader.dataset) / args.batch_size) + t
-            log_px, matrices = model.log_prob(X)
+            log_px, matrices = model(X, pause=args.pause)
+            print(f'Epoch: {epoch}\tStep: {step}\tlog_px: {log_px.mean().item():#.6g}\t{avg_time:#.6g}\r', end='')
 
-            print(f'Epoch: {epoch} Step: {step} log_px: {log_px.mean().item()}\r', end='')
+            loss = -log_px.mean()
+            loss.mean().backward()
 
-            (-log_px).mean().backward()
+            grad = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             optimizer.step()
             optimizer.zero_grad()
 
+            writer.add_scalar('Grad', grad, step)
             writer.add_scalar('Train_Likelihood', log_px.mean().item(), step)
-            if t % args.interval == 0:
-                test_data = random_test_sample().to(device)
-                train_log_px, _ = model.log_prob(X, pause=args.pause)
-                test_log_px, _ = model.log_prob(test_data, pause=args.pause)
 
-                sample = model.sample(args.n_sample, device=device)
+            if step % args.interval == 0:
+                # Grab just one random test data batch
+                for test_data, _ in test_loader:
+                    test_data = test_data.view(test_data.shape[0], -1).to(device)
+                    break
+
+                with torch.no_grad():
+                    train_log_px, train_matrices = model(X[:args.n_sample], pause=args.pause)
+                    test_log_px, test_matrices = model(test_data[:args.n_sample], pause=args.pause)
+
+                sample, sample_matrices = model.sample(args.n_sample, device=device)
                 dim = int(sample.shape[-1] ** 0.5)
                 sample = sample.view(-1, 1, dim, dim)
 
                 writer.add_scalar('Test_Likelihood', test_log_px.mean().item(), step)
                 writer.add_images('Samples', sample, step)
 
-                torch.save({
-                    'model': model.state_dict(),
-                    'opt': optimizer.state_dict()
-                }, f'{log_path(args)}/archive.pt')
-                torch.save({
-                    'model': model.state_dict(),
-                    'opt': optimizer.state_dict()
-                }, f'{log_path(args)}/archive_.pt')
+                if args.distribution == 'gaussian':
+                    writer.add_images('Train_mus', train_matrices[:,:,0,0,0].view(-1, 1, dim, dim))
+                    writer.add_images('Train_logsigmas', train_matrices[:,:,1,0,0].view(-1, 1, dim, dim))
+                    writer.add_images('Train_sigmas', train_matrices[:,:,1,0,0].view(-1, 1, dim, dim).exp())
+
+                    writer.add_images('Sample_mus', sample_matrices[:,:,0,0,0].view(-1, 1, dim, dim))
+                    writer.add_images('Sample_logsigmas', sample_matrices[:,:,1,0,0].view(-1, 1, dim, dim))
+                    writer.add_images('Sample_sigmas', sample_matrices[:,:,1,0,0].view(-1, 1, dim, dim).exp())
+
+                if not args.no_save:
+                    torch.save({
+                        'model': model.state_dict(),
+                        'opt': optimizer.state_dict()
+                    }, f'{log_path(args)}/archive.pt')
 
 
 def run(args: argparse.Namespace):
@@ -109,12 +91,23 @@ def run(args: argparse.Namespace):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
-    dart = DART(784, args.hidden_size, args.n_hidden, args.alpha_dim, args.binary)
+    # Extra parameters to the DART model constructor
+    kwargs = {}
+    if args.distribution == 'categorical':
+        kwargs['categories'] = 256
+
+    dart = DART(784, args.hidden_size, args.n_hidden, args.alpha_dim, args.distribution, *kwargs)
 
     if args.archive is not None:
         dart.load_state_dict(torch.load(args.archive)['model'])
 
-    train(args, dart)
+    with torch.autograd.profiler.profile(enabled=args.profile, use_cuda=True) as prof:
+        train(args, dart)
+
+    if args.profile:
+        with open(f'{args.name}.results', 'w') as f:
+            f.write(prof.key_averages().table(sort_by="cuda_time_total"))
+        import pdb; pdb.set_trace()
 
 if __name__ == '__main__':
     run(get_args())

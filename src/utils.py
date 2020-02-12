@@ -1,6 +1,23 @@
 import argparse
 import torch
 import time
+from typing import Callable, List
+from functools import reduce
+import torchviz
+
+
+def dc_reduce(f: Callable, values: torch.tensor):
+    n = len(values)
+    if n == 1:
+        return values[0]
+    elif n == 2:
+        return f(values[0], values[1])
+    else:
+        return f(dc_reduce(f, values[:n // 2]), dc_reduce(f, values[n // 2:]))
+
+
+def l_reduce(f: Callable, values):
+    return reduce(f, values)
 
 
 def logexpmm(A, B, time_=False):
@@ -98,7 +115,7 @@ def unstable_inputs(args: argparse.Namespace):
     return torch.tensor(A).to(args.device).unsqueeze(0), torch.tensor(B).to(args.device).unsqueeze(0)
 
 
-def test(args: argparse.Namespace):
+def test_mm(args: argparse.Namespace):
     if args.seed is not None:
         torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = True
@@ -107,7 +124,7 @@ def test(args: argparse.Namespace):
     if args.unstable:
         A, B = unstable_inputs(args)
     else:
-        A = torch.empty(2,args.dim, args.dim, device=args.device).uniform_() * args.multiplier
+        A = torch.empty(2,args.dim, args.dim, device=args.device).normal_() * args.multiplier
         B = torch.empty(2,args.dim, args.dim, device=args.device).uniform_() * args.multiplier
 
     C, time = logexpmm(A,B, time_=True)
@@ -126,7 +143,42 @@ def test(args: argparse.Namespace):
     print(f'valid_fast: {valid_fast}, valid_stable: {valid_stable}')
     if not valid_fast or not valid_stable:
         import pdb; pdb.set_trace()
+    import pdb; pdb.set_trace()
 
+
+def test_reduce(args: argparse.Namespace): 
+    n = 40
+    x = torch.ones(5).uniform_()
+    x.requires_grad = True
+    W = torch.empty(n*50*50,5).uniform_() / 10
+    W.requires_grad = True
+
+    A = (W @ x).view(n,50,50)
+    a = A[0]
+    for idx in range(1,A.shape[0]):
+        a = a @ A[idx]
+    b = reduce(lambda a,b: a @ b, A)
+    c = dc_reduce(lambda a,b: a @ b, A)
+    d = torch.chain_matmul(*A)
+    print(a)
+    print(b)
+    print(c)
+    print(d)
+    print(a-c)
+
+    ad = torchviz.make_dot(a, params={'x': x, 'W': W, 'A': A})
+    cd = torchviz.make_dot(c, params={'x': x, 'W': W, 'A': A})
+    dd = torchviz.make_dot(d, params={'x': x, 'W': W, 'A': A})
+    ad.render('linear.dot')
+    cd.render('dc.dot')
+    dd.render('dd.dot')
+    
+def test(args: argparse.Namespace):
+    if args.test_reduce:
+        test_reduce(args)
+    else:
+        test_mm(args)
+    
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -136,5 +188,6 @@ if __name__ == '__main__':
     parser.add_argument('--multiplier', type=float, default=1)
     parser.add_argument('--print', action='store_true')
     parser.add_argument('--unstable', action='store_true')
+    parser.add_argument('--test_reduce', action='store_true')
     args = parser.parse_args()
     test(args)
