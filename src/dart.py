@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from functools import reduce
-from src.utils import fast_logexpmm, stable_logexpmm, dc_reduce
+from src.utils import fast_logexpmm, stable_logexpmm, dc_reduce, fast_logexpmv
 
 
 class MaskedLinear(nn.Linear):
@@ -107,9 +107,9 @@ class DART(nn.Module):
             # the rest are sampled from our learned mixture prior defined by the logits returned by self._log_p_alpha()
             # we use these indices in the inner loop to pick which conditional to use at each step
             alpha_distribution = D.Categorical(logits=self._log_p_alpha().view(self.input_size - 1, self.alpha_dim))
+            
             zeros = torch.zeros(n,1).long().to(device)
             alphas = torch.cat((zeros, alpha_distribution.sample((n,)), zeros), 1)
-
             for idx in range(self.input_size):
                 alpha_row, alpha_column = alphas[:,idx], alphas[:,idx+1]
                 theta = self.net(x).view(-1, self.input_size, self.distribution_param_count, *(self.alpha_dim,) * 2)
@@ -150,20 +150,14 @@ class DART(nn.Module):
         # Conditional probability matrices log p(x_i | alpha_{i-1}, alpha_i, x_{<i})
         log_px_matrices = d.log_prob(x.unsqueeze(-1).unsqueeze(-1))
 
-        if self.alpha_dim > 1:
+        if self.alpha_dim > 1 or True:
             # Multiply with the alpha marginals so that matrix multiplication corresponds to summing out alpha
             joint_matrices = log_px_matrices[:,:-1] + self._log_p_alpha()
 
             # Reduce all of the "inner" matrices (all except x_1 and x_n)
-            inner_matrices = joint_matrices[:,1:].transpose(0,1)
-            if len(inner_matrices) > 1:
-                inner_matrix_product = reduce(stable_logexpmm, list(inner_matrices))
-            else:
-                inner_matrix_product = inner_matrices[0]
-
-            first = joint_matrices[:,0,0:1]
-            last = log_px_matrices[:,-1,:,0:1]
-            log_px = stable_logexpmm(first, stable_logexpmm(inner_matrix_product, last))
+            inner_matrix_product = reduce(fast_logexpmv, joint_matrices.transpose(0,1))
+            p_xn_g_alpha_n1 = log_px_matrices[:,-1,:,0:1]
+            log_px = fast_logexpmv(inner_matrix_product, p_xn_g_alpha_n1)
         else:
             log_px = log_px_matrices.sum(1).squeeze(-1).squeeze(-1)
 

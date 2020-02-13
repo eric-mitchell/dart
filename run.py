@@ -32,14 +32,16 @@ def train(args: argparse.Namespace, model: DART):
     writer = SummaryWriter(log_path(args))
 
     for epoch in range(args.epochs):
-        start = time.time()
         for t, (X, _) in enumerate(train_loader):
-            avg_time = (time.time() - start) / (t+1)
+            if t == 1:
+                start = time.time()
+
+            if args.profile and t > 50:
+                break
 
             X = X.view(X.shape[0], -1).to(device)
             step = epoch * (len(train_loader.dataset) / args.batch_size) + t
             log_px, matrices = model(X, pause=args.pause)
-            print(f'Epoch: {epoch}\tStep: {step}\tlog_px: {log_px.mean().item():#.6g}\t{avg_time:#.6g}\r', end='')
 
             loss = -log_px.mean()
             loss.mean().backward()
@@ -48,9 +50,13 @@ def train(args: argparse.Namespace, model: DART):
             optimizer.step()
             optimizer.zero_grad()
 
+            avg_time = 0 if t == 0 else (time.time() - start) / t
+            print(f'Epoch: {epoch}\tStep: {step}\tlog_px: {log_px.mean().item():#.6g}\t{avg_time:#.6g}\r', end='')
+
             writer.add_scalar('Grad', grad, step)
             writer.add_scalar('Train_Likelihood', log_px.mean().item(), step)
 
+            
             if step % args.interval == 0:
                 # Grab just one random test data batch
                 for test_data, _ in test_loader:
@@ -101,6 +107,9 @@ def run(args: argparse.Namespace):
     if args.archive is not None:
         dart.load_state_dict(torch.load(args.archive)['model'])
 
+    if args.profile:
+        args.epochs = 1
+        
     with torch.autograd.profiler.profile(enabled=args.profile, use_cuda=True) as prof:
         train(args, dart)
 

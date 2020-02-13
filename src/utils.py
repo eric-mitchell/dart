@@ -51,9 +51,35 @@ def fast_logexpmm(A, B, time_=False, stable: bool = True):
     else:
         return C
 
+def old_logexpmv(A, B, time_=False):
+    # Left multiply a batch of row vectors A with a batch of matrices B
+    assert B.shape[-2] == A.shape[-1]
+    if time_:
+        start = time.time()
+    
+    C = A.transpose(-1,-2) + B
+    maxC = C.max(-2, keepdim=True).values
+    C = (C - maxC).exp().sum(-2,keepdim=True).log() + maxC
+    
+    if time_:
+        return C, time.time() - start
+    else:
+        return C
+
+
+def fast_logexpmv(A, B, A_idx: int = 0):
+    # Left multiply a batch of row vectors A with a batch of matrices B
+    if A.shape[-2] != 1:
+        # if A is a batch of matrices, trim to just take the first row
+        A = A[:,0:1]
+
+    C = A.transpose(-1,-2) + B
+    maxC = C.max(-2, keepdim=True).values
+    return (C - maxC).exp().sum(-2,keepdim=True).log() + maxC
+
+    
 def stable_logexpmm(A, B, time_=False):
     assert B.shape[-2] == A.shape[-1]
-
     if time_:
         start = time.time()
     
@@ -172,10 +198,27 @@ def test_reduce(args: argparse.Namespace):
     ad.render('linear.dot')
     cd.render('dc.dot')
     dd.render('dd.dot')
+
+
+def test_bmv(args: argparse.Namespace):
+    A = torch.empty(2, 1, 10).normal_() * 10
+    B = torch.empty(2, 10, 10).normal_() * 10
+
+    C = A.exp().bmm(B.exp()).log()
+    C_ = fast_logexpmv(A, B)
+
+    print(C)
+    print(C_)
+    print(C-C_)
+
+    import pdb; pdb.set_trace()
+    
     
 def test(args: argparse.Namespace):
     if args.test_reduce:
         test_reduce(args)
+    elif args.test_bmv:
+        test_bmv(args)
     else:
         test_mm(args)
     
@@ -189,5 +232,6 @@ if __name__ == '__main__':
     parser.add_argument('--print', action='store_true')
     parser.add_argument('--unstable', action='store_true')
     parser.add_argument('--test_reduce', action='store_true')
+    parser.add_argument('--test_bmv', action='store_true')
     args = parser.parse_args()
     test(args)
