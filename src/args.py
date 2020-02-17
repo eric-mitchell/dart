@@ -2,6 +2,7 @@ import argparse
 
 def get_args():
     parser = argparse.ArgumentParser()
+    parser.add_argument('--pdb', action='store_true')
     parser.add_argument('--archive', type=str, default=None)
     parser.add_argument('--no_save', action='store_true')
     parser.add_argument('--profile', action='store_true')
@@ -10,7 +11,8 @@ def get_args():
     parser.add_argument('--hidden_size', type=int, default=2048)
     parser.add_argument('--n_hidden', type=int, default=2)
     parser.add_argument('--alpha_dim', type=int, default=1)
-    parser.add_argument('--interval', type=int, default=1000)
+    parser.add_argument('--save_interval', type=int, default=2000)
+    parser.add_argument('--vis_interval', type=int, default=100)
     parser.add_argument('--n_sample', type=int, default=16)
     parser.add_argument('--epochs', type=int, default=1000)
     parser.add_argument('--device', type=str, default='cpu')

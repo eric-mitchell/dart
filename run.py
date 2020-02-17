@@ -40,7 +40,7 @@ def train(args: argparse.Namespace, model: DART):
                 break
 
             X = X.view(X.shape[0], -1).to(device)
-            step = epoch * (len(train_loader.dataset) / args.batch_size) + t
+            step = int(epoch * (len(train_loader.dataset) / args.batch_size)) + t
             log_px, matrices = model(X, pause=args.pause)
 
             loss = -log_px.mean()
@@ -56,8 +56,7 @@ def train(args: argparse.Namespace, model: DART):
             writer.add_scalar('Grad', grad, step)
             writer.add_scalar('Train_Likelihood', log_px.mean().item(), step)
 
-            
-            if step % args.interval == 0:
+            if step % args.vis_interval == 0:
                 # Grab just one random test data batch
                 for test_data, _ in test_loader:
                     test_data = test_data.view(test_data.shape[0], -1).to(device)
@@ -67,7 +66,7 @@ def train(args: argparse.Namespace, model: DART):
                     train_log_px, train_matrices = model(X[:args.n_sample], pause=args.pause)
                     test_log_px, test_matrices = model(test_data[:args.n_sample], pause=args.pause)
 
-                sample, sample_matrices = model.sample(args.n_sample, device=device)
+                sample, theta = model.sample(args.n_sample, device)
                 dim = int(sample.shape[-1] ** 0.5)
                 sample = sample.view(-1, 1, dim, dim)
 
@@ -75,14 +74,23 @@ def train(args: argparse.Namespace, model: DART):
                 writer.add_images('Samples', sample, step)
 
                 if args.distribution == 'gaussian':
-                    writer.add_images('Train_mus', train_matrices[:,:,0,0,0].view(-1, 1, dim, dim))
-                    writer.add_images('Train_logsigmas', train_matrices[:,:,1,0,0].view(-1, 1, dim, dim))
-                    writer.add_images('Train_sigmas', train_matrices[:,:,1,0,0].view(-1, 1, dim, dim).exp())
+                    alphas = model.sample_alphas(args.n_sample, device)
+                    batch_idx = torch.arange(train_matrices.shape[0], device=train_matrices.device)
+                    
+                    #writer.add_images('Train_mus', train_matrices[batch_idx,:,0,alphas[:,:-1],alphas[:,1:]].view(-1, 1, dim, dim))
+                    #writer.add_images('Train_logsigmas', train_matrices[batch_idx,:,1,alphas[:,:-1],alphas[:,1:]].view(-1, 1, dim, dim))
+                    #writer.add_images('Train_sigmas', train_matrices[batch_idx,:,1,alphas[:,:-1],alphas[:,1:]].view(-1, 1, dim, dim).exp())
 
-                    writer.add_images('Sample_mus', sample_matrices[:,:,0,0,0].view(-1, 1, dim, dim))
-                    writer.add_images('Sample_logsigmas', sample_matrices[:,:,1,0,0].view(-1, 1, dim, dim))
-                    writer.add_images('Sample_sigmas', sample_matrices[:,:,1,0,0].view(-1, 1, dim, dim).exp())
+                    mus, log_sigmas = [], []
+                    theta_idx = torch.arange(theta.shape[1], device=theta.device)
+                    for theta_, alpha_ in zip(theta, alphas):
+                        mus.append(theta_[theta_idx, 0, alpha_[:-1], alpha_[1:]].view(1, dim, dim).sigmoid())
+                        log_sigmas.append(theta_[theta_idx, 1, alpha_[:-1], alpha_[1:]].view(1, dim, dim))
 
+                    writer.add_images('Sample_mus', torch.stack(mus))
+                    writer.add_images('Sample_sigmas', torch.stack(log_sigmas).exp())
+
+            if step % args.save_interval == 0:
                 if not args.no_save:
                     torch.save({
                         'model': model.state_dict(),
@@ -106,6 +114,9 @@ def run(args: argparse.Namespace):
 
     if args.archive is not None:
         dart.load_state_dict(torch.load(args.archive)['model'])
+
+    if args.pdb:
+        import pdb; pdb.set_trace()
 
     if args.profile:
         args.epochs = 1

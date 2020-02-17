@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from functools import reduce
-from src.utils import fast_logexpmm, stable_logexpmm, dc_reduce, fast_logexpmv
+from src.utils import fast_logexpmm, stable_logexpmm, dc_reduce, fast_logexpmv, fast_logexpmv_right
 
 
 class MaskedLinear(nn.Linear):
@@ -57,10 +57,23 @@ class DART(nn.Module):
                                   masks[-1].repeat(1,output_values_per_dim).view(-1,self.hidden_size)
         )]
 
-        log_p_alpha = torch.ones(1, self.input_size - 1, 1, alpha_dim) / float(alpha_dim)
-        self.unnormalized_log_p_alpha = torch.nn.Parameter(log_p_alpha.log())
-
+        #p_alpha_eps = 1e-6
+        #p_alpha = torch.ones(1, self.input_size - 1, 1, alpha_dim) * p_alpha_eps
+        #p_alpha[:,:,:,0] = 1 - p_alpha_eps * (alpha_dim - 1)
+        #p_alpha = torch.ones(1, self.input_size - 1, 1, alpha_dim) / float(alpha_dim)
+        #self.unnormalized_log_p_alpha = torch.nn.Parameter(p_alpha.log())
+        log_p_alpha = torch.empty(1, self.input_size - 1, 1, alpha_dim).normal_()
+        self.unnormalized_log_p_alpha = torch.nn.Parameter(log_p_alpha)
+        #self.unnormalized_log_p_alpha = p_alpha.log()
+        #self.unnormalized_log_p_alpha.requires_grad = False
+        
         self.net = nn.Sequential(*self.net)
+
+    '''
+    def to(self, *args, **kwargs):
+        super().to(*args, *kwargs)
+        self.unnormalized_log_p_alpha = self.unnormalized_log_p_alpha.to(*args, *kwargs)
+    '''
 
     def create_masks(self):
         """
@@ -94,6 +107,21 @@ class DART(nn.Module):
     def forward(self, x, pause: bool = False):
         return self.log_prob(x, pause)
 
+    def _sigmoid_gaussian(self, loc: torch.tensor, scale: torch.tensor):
+        distribution = D.Normal(loc, scale)
+        transform = D.transforms.SigmoidTransform()
+        return D.TransformedDistribution(distribution, transform)
+
+    def sample_alphas(self, n: int, device: str = 'cpu'):
+        # Sample random latent "alpha" values
+        # alpha_0 and alpha_n are fixed to have only one possible value, so we hard-code their indices to be zero here
+        # the rest are sampled from our learned mixture prior defined by the logits returned by self._log_p_alpha()
+        # we use these indices in the inner loop to pick which conditional to use at each step
+        alpha_distribution = D.Categorical(logits=self._log_p_alpha().view(self.input_size - 1, self.alpha_dim))
+        zeros = torch.zeros(n,1).long().to(device)
+        alphas = torch.cat((zeros, alpha_distribution.sample((n,)), zeros), 1)
+        return alphas
+
     def sample(self, n: int, device: str = 'cpu'):
         """
         Sample n samples from the model.
@@ -102,14 +130,7 @@ class DART(nn.Module):
             z = torch.empty(n, self.input_size).to(device).normal_()
             x = torch.zeros_like(z)
 
-            # Sample random latent "alpha" values
-            # alpha_0 and alpha_n are fixed to have only one possible value, so we hard-code their indices to be zero here
-            # the rest are sampled from our learned mixture prior defined by the logits returned by self._log_p_alpha()
-            # we use these indices in the inner loop to pick which conditional to use at each step
-            alpha_distribution = D.Categorical(logits=self._log_p_alpha().view(self.input_size - 1, self.alpha_dim))
-            
-            zeros = torch.zeros(n,1).long().to(device)
-            alphas = torch.cat((zeros, alpha_distribution.sample((n,)), zeros), 1)
+            alphas = self.sample_alphas(n, device)
             for idx in range(self.input_size):
                 alpha_row, alpha_column = alphas[:,idx], alphas[:,idx+1]
                 theta = self.net(x).view(-1, self.input_size, self.distribution_param_count, *(self.alpha_dim,) * 2)
@@ -126,10 +147,13 @@ class DART(nn.Module):
                 elif self.distribution == 'gaussian':
                     mu = theta[batch_idx,idx,0,alpha_row,alpha_column]
                     std = theta[batch_idx,idx,1,alpha_row,alpha_column].exp()
-                    d = D.Normal(mu, std)
-                    x[:,idx] = d.sample().clamp(min=0,max=1)
+                    d = self._sigmoid_gaussian(mu, std)
+                    x[:,idx] = d.sample()
 
-        return x, theta.unsqueeze(-1).unsqueeze(-1)
+            assert (x >= 0).all()
+            assert (x <= 1).all()
+
+        return x, theta
 
     def log_prob(self, x, pause: bool = False):
         """
@@ -145,13 +169,22 @@ class DART(nn.Module):
             d = D.Categorical(logits=theta.permute(0,1,3,4,2)) # We need to permute to put the categories on the last dimension for D.Categorical
         elif self.distribution == 'gaussian':
             mu, std = theta[:,:,0], theta[:,:,1].exp()
-            d = D.Normal(mu, std)
+            d = self._sigmoid_gaussian(mu, std)
 
         # Conditional probability matrices log p(x_i | alpha_{i-1}, alpha_i, x_{<i})
         log_px_matrices = d.log_prob(x.unsqueeze(-1).unsqueeze(-1))
 
-        if self.alpha_dim > 1 or True:
+        if self.alpha_dim > 1:
             # Multiply with the alpha marginals so that matrix multiplication corresponds to summing out alpha
+            '''
+            # For 'fold right', if that's your thing
+            joint_matrices = log_px_matrices[:,1:] + self._log_p_alpha().transpose(-1,-2)
+
+            # Reduce all of the "inner" matrices (all except x_1 and x_n)
+            inner_matrix_product = reduce(fast_logexpmv_right, joint_matrices.transpose(0,1).flip(0))
+            p_x1_g_alpha1 = log_px_matrices[:,0,0:1]
+            log_px = fast_logexpmv_right(inner_matrix_product, p_x1_g_alpha1)
+            '''
             joint_matrices = log_px_matrices[:,:-1] + self._log_p_alpha()
 
             # Reduce all of the "inner" matrices (all except x_1 and x_n)

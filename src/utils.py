@@ -71,11 +71,22 @@ def fast_logexpmv(A, B, A_idx: int = 0):
     # Left multiply a batch of row vectors A with a batch of matrices B
     if A.shape[-2] != 1:
         # if A is a batch of matrices, trim to just take the first row
-        A = A[:,0:1]
+        A = A[:,A_idx:A_idx + 1]
 
     C = A.transpose(-1,-2) + B
     maxC = C.max(-2, keepdim=True).values
     return (C - maxC).exp().sum(-2,keepdim=True).log() + maxC
+
+
+def fast_logexpmv_right(A, B, A_idx: int = 0):
+    # Left multiply a batch of row vectors A with a batch of matrices B
+    if A.shape[-1] != 1:
+        # if A is a batch of matrices, trim to just take the first row
+        A = A[:,:,A_idx:A_idx + 1]
+
+    C = A.transpose(-1,-2) + B
+    maxC = C.max(-1, keepdim=True).values
+    return (C - maxC).exp().sum(-1,keepdim=True).log() + maxC
 
     
 def stable_logexpmm(A, B, time_=False):
@@ -180,24 +191,21 @@ def test_reduce(args: argparse.Namespace):
     W.requires_grad = True
 
     A = (W @ x).view(n,50,50)
-    a = A[0]
-    for idx in range(1,A.shape[0]):
-        a = a @ A[idx]
-    b = reduce(lambda a,b: a @ b, A)
-    c = dc_reduce(lambda a,b: a @ b, A)
-    d = torch.chain_matmul(*A)
-    print(a)
+    b = reduce(fast_logexpmm, A.unsqueeze(1))
+    c = dc_reduce(fast_logexpmm, A.unsqueeze(1))
     print(b)
     print(c)
-    print(d)
-    print(a-c)
+    
+    print(b-c)
 
+    '''
     ad = torchviz.make_dot(a, params={'x': x, 'W': W, 'A': A})
     cd = torchviz.make_dot(c, params={'x': x, 'W': W, 'A': A})
     dd = torchviz.make_dot(d, params={'x': x, 'W': W, 'A': A})
     ad.render('linear.dot')
     cd.render('dc.dot')
     dd.render('dd.dot')
+    '''
 
 
 def test_bmv(args: argparse.Namespace):
@@ -206,19 +214,32 @@ def test_bmv(args: argparse.Namespace):
 
     C = A.exp().bmm(B.exp()).log()
     C_ = fast_logexpmv(A, B)
+    C__ = fast_logexpmv_right(A, B)
 
     print(C)
     print(C_)
+    print(C__)
     print(C-C_)
+    print(C-C__)
 
     import pdb; pdb.set_trace()
     
+
+def test_order(args: argparse.Namespace):
+    A = torch.randn(1,4,4)
+    B = torch.randn(1,4,4)
+    C = torch.randn(1,4,4)
+
+    print(fast_logexpmm(A, fast_logexpmm(B, C)))
+    print(fast_logexpmm(fast_logexpmm(A, B), C))
     
 def test(args: argparse.Namespace):
     if args.test_reduce:
         test_reduce(args)
     elif args.test_bmv:
         test_bmv(args)
+    elif args.test_order:
+        test_order(args)
     else:
         test_mm(args)
     
@@ -233,5 +254,6 @@ if __name__ == '__main__':
     parser.add_argument('--unstable', action='store_true')
     parser.add_argument('--test_reduce', action='store_true')
     parser.add_argument('--test_bmv', action='store_true')
+    parser.add_argument('--test_order', action='store_true')
     args = parser.parse_args()
     test(args)
