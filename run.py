@@ -69,7 +69,8 @@ def train(args: argparse.Namespace, model: DART):
                 sample, theta = model.sample(args.n_sample, device)
                 dim = int(sample.shape[-1] ** 0.5)
                 sample = sample.view(-1, 1, dim, dim)
-
+                if args.distribution == 'gaussian':
+                    sample = sample.sigmoid()
                 writer.add_scalar('Test_Likelihood', test_log_px.mean().item(), step)
                 writer.add_images('Samples', sample, step)
 

@@ -16,12 +16,12 @@ def get_mnist_data(device, distribution: str, train_batch_size: int, test_batch_
             lambda x: x * 255
         ])
     elif distribution == 'gaussian':
-        noise = 0.05
-        eps = 1e-3
+        noise = 0.01
+        eps = 0.05
         preprocess = transforms.Compose([
             transforms.ToTensor(),
-            lambda x: x * (1 - noise - eps) + (noise + eps) / 2, # Squash slightly
-            lambda x: x + torch.empty_like(x).uniform_(-eps/2,eps/2) # Add noise
+            lambda x: (1 - noise) * x + noise * torch.empty_like(x).uniform_(), # Add noise
+            lambda x: (1 - eps) * x + eps / 2, # Squash slightly
         ])
 
     train_loader = torch.utils.data.DataLoader(
