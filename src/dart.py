@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from functools import reduce
-from src.utils import fast_logexpmm, stable_logexpmm, dc_reduce, fast_logexpmv, fast_logexpmv_right
+from src.utils import fast_logexpmv
 
 
 class MaskedLinear(nn.Linear):
@@ -46,6 +46,7 @@ class DART(nn.Module):
             if 'categories' not in kwargs:
                 raise ValueError('Must pass number of categories as categories=n_categories')
             self.distribution_param_count = kwargs['categories']
+            self.kwargs = kwargs
         elif distribution == 'gaussian':
             self.distribution_param_count = 2
 
@@ -57,23 +58,10 @@ class DART(nn.Module):
                                   masks[-1].repeat(1,output_values_per_dim).view(-1,self.hidden_size)
         )]
 
-        #p_alpha_eps = 1e-6
-        #p_alpha = torch.ones(1, self.input_size - 1, 1, alpha_dim) * p_alpha_eps
-        #p_alpha[:,:,:,0] = 1 - p_alpha_eps * (alpha_dim - 1)
-        #p_alpha = torch.ones(1, self.input_size - 1, 1, alpha_dim) / float(alpha_dim)
-        #self.unnormalized_log_p_alpha = torch.nn.Parameter(p_alpha.log())
         log_p_alpha = torch.empty(1, self.input_size - 1, 1, alpha_dim).normal_()
         self.unnormalized_log_p_alpha = torch.nn.Parameter(log_p_alpha)
-        #self.unnormalized_log_p_alpha = p_alpha.log()
-        #self.unnormalized_log_p_alpha.requires_grad = False
         
         self.net = nn.Sequential(*self.net)
-
-    '''
-    def to(self, *args, **kwargs):
-        super().to(*args, *kwargs)
-        self.unnormalized_log_p_alpha = self.unnormalized_log_p_alpha.to(*args, *kwargs)
-    '''
 
     def create_masks(self):
         """
@@ -104,8 +92,8 @@ class DART(nn.Module):
         assert ((log_p.exp().sum(-1) - 1).abs() < 1e-6).all()
         return log_p
 
-    def forward(self, x, pause: bool = False):
-        return self.log_prob(x, pause)
+    def forward(self, x):
+        return self.log_prob(x)
 
     def _sigmoid_gaussian(self, loc: torch.tensor, scale: torch.tensor):
         distribution = D.Normal(loc, scale)
@@ -127,8 +115,7 @@ class DART(nn.Module):
         Sample n samples from the model.
         """
         with torch.no_grad():
-            z = torch.empty(n, self.input_size).to(device).normal_()
-            x = torch.zeros_like(z)
+            x = torch.zeros(n, self.input_size).to(device)
 
             alphas = self.sample_alphas(n, device)
             for idx in range(self.input_size):
@@ -143,7 +130,7 @@ class DART(nn.Module):
                 elif self.distribution == 'categorical':
                     category_logits = theta[batch_idx,idx,:,alpha_row,alpha_column]
                     d = D.Categorical(logits=category_logits)
-                    x[:,idx] = d.sample()
+                    x[:,idx] = d.sample().float() / (self.kwargs['categories'] - 1)
                 elif self.distribution == 'gaussian':
                     mu = theta[batch_idx,idx,0,alpha_row,alpha_column]
                     std = theta[batch_idx,idx,1,alpha_row,alpha_column].exp()
@@ -155,13 +142,10 @@ class DART(nn.Module):
 
         return x, theta
 
-    def log_prob(self, x, pause: bool = False):
+    def log_prob(self, x):
         """
         Evaluate the log likelihood of a batch of samples.
         """
-        if pause:
-            import pdb; pdb.set_trace()
-
         theta = self.net(x).view(-1, self.input_size, self.distribution_param_count, *(self.alpha_dim,) * 2)
         if self.distribution == 'binary':
             d = D.Bernoulli(logits=theta[:,:,0])
@@ -171,26 +155,21 @@ class DART(nn.Module):
             mu, std = theta[:,:,0], theta[:,:,1].exp()
             d = self._sigmoid_gaussian(mu, std)
 
+        # We need the indices for categorical distribution
+        if self.distribution == 'categorical':
+            x = x * (self.kwargs['categories'] - 1)
+
         # Conditional probability matrices log p(x_i | alpha_{i-1}, alpha_i, x_{<i})
         log_px_matrices = d.log_prob(x.unsqueeze(-1).unsqueeze(-1))
 
-        if self.alpha_dim > 1:
+        if self.alpha_dim > 1 or True:
             # Multiply with the alpha marginals so that matrix multiplication corresponds to summing out alpha
-            '''
-            # For 'fold right', if that's your thing
-            joint_matrices = log_px_matrices[:,1:] + self._log_p_alpha().transpose(-1,-2)
-
-            # Reduce all of the "inner" matrices (all except x_1 and x_n)
-            inner_matrix_product = reduce(fast_logexpmv_right, joint_matrices.transpose(0,1).flip(0))
-            p_x1_g_alpha1 = log_px_matrices[:,0,0:1]
-            log_px = fast_logexpmv_right(inner_matrix_product, p_x1_g_alpha1)
-            '''
             joint_matrices = log_px_matrices[:,:-1] + self._log_p_alpha()
 
             # Reduce all of the "inner" matrices (all except x_1 and x_n)
-            inner_matrix_product = reduce(fast_logexpmv, joint_matrices.transpose(0,1))
+            left_reduce_product = reduce(fast_logexpmv, joint_matrices.transpose(0,1))
             p_xn_g_alpha_n1 = log_px_matrices[:,-1,:,0:1]
-            log_px = fast_logexpmv(inner_matrix_product, p_xn_g_alpha_n1)
+            log_px = fast_logexpmv(left_reduce_product, p_xn_g_alpha_n1)
         else:
             log_px = log_px_matrices.sum(1).squeeze(-1).squeeze(-1)
 

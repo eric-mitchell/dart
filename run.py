@@ -10,7 +10,8 @@ import time
 
 from src.args import get_args
 from src.dart import DART
-from src.data import get_mnist_data
+from src.tensor import TT
+from src.data import get_data
 
 
 def log_path(args: argparse.Namespace):
@@ -21,8 +22,8 @@ def train(args: argparse.Namespace, model: DART):
     device = torch.device(args.device)
     model.to(device)
 
-    train_loader, test_loader = get_mnist_data(args.device, args.distribution,
-                                               args.batch_size, args.test_batch_size)
+    train_loader, test_loader = get_data(args.dataset, args.distribution,
+                                         args.batch_size, args.test_batch_size)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
@@ -41,7 +42,7 @@ def train(args: argparse.Namespace, model: DART):
 
             X = X.view(X.shape[0], -1).to(device)
             step = int(epoch * (len(train_loader.dataset) / args.batch_size)) + t
-            log_px, matrices = model(X, pause=args.pause)
+            log_px, matrices = model(X)
 
             loss = -log_px.mean()
             loss.mean().backward()
@@ -63,14 +64,15 @@ def train(args: argparse.Namespace, model: DART):
                     break
 
                 with torch.no_grad():
-                    train_log_px, train_matrices = model(X[:args.n_sample], pause=args.pause)
-                    test_log_px, test_matrices = model(test_data[:args.n_sample], pause=args.pause)
+                    train_log_px, train_matrices = model(X[:args.n_sample])
+                    test_log_px, test_matrices = model(test_data[:args.n_sample])
 
                 sample, theta = model.sample(args.n_sample, device)
                 dim = int(sample.shape[-1] ** 0.5)
                 sample = sample.view(-1, 1, dim, dim)
                 if args.distribution == 'gaussian':
                     sample = sample.sigmoid()
+
                 writer.add_scalar('Test_Likelihood', test_log_px.mean().item(), step)
                 writer.add_images('Samples', sample, step)
 
@@ -78,10 +80,6 @@ def train(args: argparse.Namespace, model: DART):
                     alphas = model.sample_alphas(args.n_sample, device)
                     batch_idx = torch.arange(train_matrices.shape[0], device=train_matrices.device)
                     
-                    #writer.add_images('Train_mus', train_matrices[batch_idx,:,0,alphas[:,:-1],alphas[:,1:]].view(-1, 1, dim, dim))
-                    #writer.add_images('Train_logsigmas', train_matrices[batch_idx,:,1,alphas[:,:-1],alphas[:,1:]].view(-1, 1, dim, dim))
-                    #writer.add_images('Train_sigmas', train_matrices[batch_idx,:,1,alphas[:,:-1],alphas[:,1:]].view(-1, 1, dim, dim).exp())
-
                     mus, log_sigmas = [], []
                     theta_idx = torch.arange(theta.shape[1], device=theta.device)
                     for theta_, alpha_ in zip(theta, alphas):
@@ -111,10 +109,14 @@ def run(args: argparse.Namespace):
     if args.distribution == 'categorical':
         kwargs['categories'] = 256
 
-    dart = DART(784, args.hidden_size, args.n_hidden, args.alpha_dim, args.distribution, *kwargs)
-
+    if args.model == 'dart':
+        model = DART(784, args.hidden_size, args.n_hidden, args.alpha_dim, args.distribution, **kwargs)
+    elif args.model == 'tt':
+        assert args.distribution == 'binary', 'TT model only works with binary variables'
+        model = TT(784, args.alpha_dim)
+        
     if args.archive is not None:
-        dart.load_state_dict(torch.load(args.archive)['model'])
+        model.load_state_dict(torch.load(args.archive)['model'])
 
     if args.pdb:
         import pdb; pdb.set_trace()
@@ -123,7 +125,7 @@ def run(args: argparse.Namespace):
         args.epochs = 1
         
     with torch.autograd.profiler.profile(enabled=args.profile, use_cuda=True) as prof:
-        train(args, dart)
+        train(args, model)
 
     if args.profile:
         with open(f'{args.name}.results', 'w') as f:
