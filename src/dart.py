@@ -21,13 +21,14 @@ class MaskedLinear(nn.Linear):
 class DART(nn.Module):
     """DART based on Masked Autoencoder for Distribution Estimation.
     Gaussian MADE to work with real-valued inputs"""
-    def __init__(self, input_size: int, hidden_size: int, n_hidden: int, alpha_dim: int = 1, distribution: str = 'binary', **kwargs):
+    def __init__(self, input_size: int, hidden_size: int, n_hidden: int, alpha_dim: int = 1, distribution: str = 'binary', sampling_order: str = 'sequential', **kwargs):
         super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.n_hidden = n_hidden
         self.alpha_dim = alpha_dim
         self.distribution = distribution
+        self.sampling_order = sampling_order
         
         masks = self.create_masks()
 

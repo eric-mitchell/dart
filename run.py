@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 from torchvision import datasets, transforms
+from torch.optim import lr_scheduler
 import argparse
 import os
 import random
@@ -23,22 +24,29 @@ def train(args: argparse.Namespace, model: DART):
     model.to(device)
 
     train_loader, test_loader = get_data(args.dataset, args.distribution,
-                                         args.batch_size, args.test_batch_size)
+                                         args.batch_size * (5 if args.filter_class is not None else 1),
+                                         args.test_batch_size)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-
+    scheduler = lr_scheduler.StepLR(optimizer, 3, gamma=0.1)
+    
     if not os.path.exists(log_path(args)):
         os.makedirs(log_path(args))
 
     writer = SummaryWriter(log_path(args))
 
     for epoch in range(args.epochs):
-        for t, (X, _) in enumerate(train_loader):
+        for t, (X, y) in enumerate(train_loader):
             if t == 1:
                 start = time.time()
 
             if args.profile and t > 50:
                 break
+
+            if args.filter_class is not None:
+                X = X[y==args.filter_class]
+                if len(X) == 0:
+                    continue
 
             X = X.view(X.shape[0], -1).to(device)
             step = int(epoch * (len(train_loader.dataset) / args.batch_size)) + t
@@ -95,6 +103,8 @@ def train(args: argparse.Namespace, model: DART):
                         'model': model.state_dict(),
                         'opt': optimizer.state_dict()
                     }, f'{log_path(args)}/archive.pt')
+
+        scheduler.step()
 
 
 def run(args: argparse.Namespace):

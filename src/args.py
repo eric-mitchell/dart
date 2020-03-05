@@ -2,6 +2,7 @@ import argparse
 
 def get_args():
     parser = argparse.ArgumentParser()
+    parser.add_argument('--filter_class', type=int, default=None)
     parser.add_argument('--model', type=str, default='dart')
     parser.add_argument('--dataset', type=str, default='mnist')
     parser.add_argument('--pdb', action='store_true')

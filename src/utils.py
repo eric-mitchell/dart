@@ -114,7 +114,7 @@ def stable_logexpmm(A, B, time_=False):
         return result, time.time() - start
     else:
         return result
-    
+
 
 def unstable_inputs(args: argparse.Namespace):
     A = [[-232.8080, -232.8080, -339.6227, -232.8080, -233.7948, -232.8080,

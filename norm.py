@@ -3,16 +3,16 @@ import torch
 from src.dart import DART
 from src.tensor import TT
 
-dim = 8
+dim = 10
 
 d = DART(dim, 10, 2, 1, 'binary')
 d2 = DART(dim, 10, 2, 2, 'binary')
 d4 = DART(dim, 10, 2, 4, 'binary')
 d100 = DART(dim, 10, 2, 100, 'binary')
 
-tt4 = TT(dim, 4)
+tt4 = TT(dim, 5)
 
-tt4.sample(10)
+#tt4.sample(10)
 
 X = torch.zeros(2 ** dim, dim)
 idx = torch.arange(2 ** dim)
