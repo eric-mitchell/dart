@@ -10,7 +10,7 @@ d2 = DART(dim, 10, 2, 2, 'binary')
 d4 = DART(dim, 10, 2, 4, 'binary')
 d100 = DART(dim, 10, 2, 100, 'binary')
 
-tt4 = TT(dim, 5)
+tt4 = TT(dim, 25)
 
 #tt4.sample(10)
 
@@ -25,9 +25,8 @@ print(d4(X)[0].exp().sum())
 print(d100(X)[0].exp().sum())
 print(tt4(X)[0].exp().sum())
 
-exit(0)
-samples = d4.sample(1000000)
+samples = tt4.sample(1000000)
 for x in X:
     p_sample = (samples[0] == x).all(-1).float().mean()
-    p_model = d4(x.unsqueeze(0))[0].exp().squeeze()
+    p_model = tt4(x.unsqueeze(0))[0].exp().squeeze()
     print(p_sample.item(), p_model.item(), ((p_sample - p_model) / p_model).item())

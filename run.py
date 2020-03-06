@@ -28,7 +28,7 @@ def train(args: argparse.Namespace, model: DART):
                                          args.test_batch_size)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    scheduler = lr_scheduler.StepLR(optimizer, 3, gamma=0.1)
+    scheduler = lr_scheduler.StepLR(optimizer, 3, gamma=1)
     
     if not os.path.exists(log_path(args)):
         os.makedirs(log_path(args))

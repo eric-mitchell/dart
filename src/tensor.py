@@ -20,19 +20,25 @@ class TT(nn.Module):
         self.input_size = input_size
         self.alpha_dim = alpha_dim
         
-        log_p_alpha = torch.empty(1, self.input_size, 1, alpha_dim).uniform_()
-        self.unnormalized_log_p_alpha = torch.nn.Parameter(log_p_alpha)
+        self.u_log_p_a1 = nn.Parameter(torch.empty(1, 1, 1, alpha_dim).normal_())
+        self.u_log_transition_matrices = nn.Parameter(torch.empty(self.input_size - 1, alpha_dim, alpha_dim).normal_())
+        self.log_p_xi_g_ai = nn.Parameter(torch.empty(1, self.input_size, 1, alpha_dim).normal_())
 
-        self.theta = nn.Parameter(torch.empty((1, input_size, alpha_dim, alpha_dim)).uniform_())
+    def _normalize_logits(self, unnorm: torch.tensor, dim: int = -1):
+        max_u = unnorm.max(dim, keepdim=True).values
+        logsumexp = (unnorm - max_u).exp().sum(dim, keepdim=True).log()
+        norm = unnorm - (max_u + logsumexp)
 
-    def _log_p_alpha(self):
-        u_log_p = self.unnormalized_log_p_alpha
-        max_u = u_log_p.max(-1, keepdim=True).values
-        logsumexp = (u_log_p - max_u).exp().sum(-1, keepdim=True).log()
-        log_p = u_log_p - (max_u + logsumexp)
+        assert ((norm.exp().sum(dim) - 1).abs() < 1e-5).all()
+        return norm
+        
+    @property
+    def log_p_a1(self):
+        return self._normalize_logits(self.u_log_p_a1)
 
-        assert ((log_p.exp().sum(-1) - 1).abs() < 1e-5).all()
-        return log_p
+    @property
+    def log_transition(self):
+        return self._normalize_logits(self.u_log_transition_matrices, dim=-1)
 
     def forward(self, x):
         return self.log_prob(x)
@@ -42,40 +48,38 @@ class TT(nn.Module):
         # alpha_0 and alpha_n are fixed to have only one possible value, so we hard-code their indices to be zero here
         # the rest are sampled from our learned mixture prior defined by the logits returned by self._log_p_alpha()
         # we use these indices in the inner loop to pick which conditional to use at each step
-        alpha_distribution = D.Categorical(logits=self._log_p_alpha().view(self.input_size, self.alpha_dim))
-        #zeros = torch.zeros(n,1).long().to(device)
-        #alphas = torch.cat((zeros, alpha_distribution.sample((n,)), zeros), 1)
-        #return alphas
-        return alpha_distribution.sample((n,))
+        alphas = []
+        logits = self.log_p_a1.repeat((n,1,1,1))
+        for idx in range(self.input_size):
+            alpha_d = D.Categorical(logits=logits.squeeze())
+            alphas.append(alpha_d.sample())
+            if idx < self.input_size - 1:
+                logits = self.log_transition.squeeze()[idx,alphas[-1]]
+        return torch.stack(alphas, 1)
+        
 
     def sample(self, n: int = 1, device: str = 'cpu'):
         alphas = self.sample_alphas(n, device)
+        betas = self.log_p_xi_g_ai.squeeze(-2).repeat(n,1,1).gather(-1, alphas.unsqueeze(-1))
 
-        alpha_rows = torch.cat((alphas[:,-1:], alphas[:,:-1]), 1)
-        alpha_columns = alphas
-        
-        batch_idx = torch.zeros(n,self.input_size).to(device).long()
-        element_idx = torch.arange(self.input_size).to(device).view(1,-1).repeat(n,1)
-
-        thetas = self.theta[batch_idx,element_idx,alpha_rows,alpha_columns]
-
-        return D.Bernoulli(logits=thetas).sample(), self.theta
+        return D.Bernoulli(logits=betas.squeeze()).sample(), betas
     
     def log_prob(self, x):
         # Conditional probability matrices log p(x_i | alpha_{i-1}, alpha_i, x_{<i})
-        d = D.Bernoulli(logits=self.theta)
-        log_px_matrices = d.log_prob(x.unsqueeze(-1).unsqueeze(-1))
-        #log_px_matrices = -self.theta.clamp(min=0) + self.theta * x.unsqueeze(-1).unsqueeze(-1) - (1 + (-self.theta.abs()).exp()).log()
+        d = D.Bernoulli(logits=self.log_p_xi_g_ai)
+        log_px_vectors = d.log_prob(x.unsqueeze(-1).unsqueeze(-1))
         
         # Multiply with the alpha marginals so that matrix multiplication corresponds to summing out alpha
-        joint_matrices = log_px_matrices + self._log_p_alpha()
-
+        #log_px_vectors = torch.cat((log_px_vectors[:,0:1] + self.log_p_a1, log_px_vectors[:,1:]), 1)
+        
+        reduction_matrices = log_px_vectors[:,1:] + self.log_transition
+        log_pxa1 = log_px_vectors[:,0:1] + self.log_p_a1
+        reduction_matrices = torch.cat((log_pxa1.repeat(1,1,self.alpha_dim,1), reduction_matrices), 1)
+        
         # Reduce all of the "inner" matrices (all except x_1 and x_n)
-        left_reduce_product = dc_reduce(fast_logexpmm, joint_matrices.transpose(0,1))
-        #p_xn_g_alpha_n1 = log_px_matrices[:,-1,:,0:1]
-        #log_px = fast_logexpmv(left_reduce_product, p_xn_g_alpha_n1)
-
-        diag = left_reduce_product.diagonal(dim1=-2,dim2=-1)
-        log_px = diag.logsumexp(-1)
-
-        return log_px, self.theta
+        #left_reduce_product = reduce(fast_logexpmm, reduction_matrices.transpose(0,1))
+        #complete_product = fast_logexpmv(log_px_vectors[:,0], left_reduce_product)
+        #log_px = complete_product.logsumexp(-1)
+        p_x_g_an = reduce(fast_logexpmv, reduction_matrices.transpose(0,1))
+        log_px = p_x_g_an.logsumexp(-1)
+        return log_px, self.log_p_a1
