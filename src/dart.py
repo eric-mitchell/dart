@@ -210,7 +210,7 @@ class DARTHMM(nn.Module):
         elif distribution == 'gaussian':
             self.distribution_param_count = 2
 
-        output_values_per_dim = self.distribution_param_count * alpha_dim
+        output_values_per_dim = self.distribution_param_count * alpha_dim + alpha_dim ** 2
 
         # last layer doesn't have nonlinear activation
         self.net += [MaskedLinear(self.hidden_size,
@@ -219,7 +219,7 @@ class DARTHMM(nn.Module):
         )]
 
         self.u_log_p_a1 = nn.Parameter(torch.empty(1, 1, 1, alpha_dim).normal_())
-        self.u_log_transition_matrices = nn.Parameter(torch.empty(self.input_size - 1, alpha_dim, alpha_dim).normal_())
+        #self.u_log_transition_matrices = nn.Parameter(torch.empty(self.input_size - 1, alpha_dim, alpha_dim).normal_())
         
         self.net = nn.Sequential(*self.net)
 
@@ -267,23 +267,6 @@ class DARTHMM(nn.Module):
         transform = D.transforms.SigmoidTransform()
         return D.TransformedDistribution(distribution, transform)
 
-    def sample_alphas(self, n: int, device: str = 'cpu', a1: int = None):
-        alphas = []
-        logits = self.log_p_a1.repeat((n,1,1,1))
-        if a1 is not None:
-            logits[:,:,:,a1] = 100
-            if a1 > 0:
-                logits[:,:,:,:a1] = 0
-            if a1 < self.alpha_dim - 1:
-                logits[:,:,:,a1+1:] = 0
-            
-        for idx in range(self.input_size):
-            alpha_d = D.Categorical(logits=logits.squeeze())
-            alphas.append(alpha_d.sample())
-            if idx < self.input_size - 1:
-                logits = self.log_transition.squeeze()[idx,alphas[-1]]
-        return torch.stack(alphas, 1)
-
     def sample(self, n: int, device: str = 'cpu', a1: int = None):
         """
         Sample n samples from the model.
@@ -291,10 +274,18 @@ class DARTHMM(nn.Module):
         with torch.no_grad():
             x = torch.zeros(n, self.input_size).to(device)
 
-            alphas = self.sample_alphas(n, device, a1)
+            logits = self.log_p_a1.repeat((n,1,1,1))
+            alpha = D.Categorical(logits=logits.squeeze()).sample()
             for idx in range(self.input_size):
-                theta = self.net(x).view(-1, self.input_size, self.distribution_param_count, self.alpha_dim)
-                alpha = alphas[:,idx]
+                output = self.net(x).view(-1, self.input_size, self.distribution_param_count * self.alpha_dim + self.alpha_dim ** 2)
+                theta = output[:,:,:self.distribution_param_count * self.alpha_dim].view(-1, self.input_size, self.distribution_param_count, self.alpha_dim)
+                if idx > 0:
+                    log_transition = output[:,:,self.distribution_param_count * self.alpha_dim:].view(-1, self.input_size, self.alpha_dim, self.alpha_dim)
+                    log_transition = self._normalize_logits(log_transition, dim=-1)
+                    batch_idx = torch.arange(log_transition.shape[0], device=log_transition.device)
+                    logits = log_transition[batch_idx,idx,alpha]
+                    alpha = D.Categorical(logits=logits.squeeze()).sample()
+
                 batch_idx = torch.arange(theta.shape[0]).to(theta.device)
 
                 if self.distribution == 'binary':
@@ -320,7 +311,11 @@ class DARTHMM(nn.Module):
         """
         Evaluate the log likelihood of a batch of samples.
         """
-        theta = self.net(x).view(-1, self.input_size, self.distribution_param_count, self.alpha_dim)
+        output = self.net(x).view(-1, self.input_size, self.distribution_param_count * self.alpha_dim + self.alpha_dim ** 2)
+        theta = output[:,:,:self.distribution_param_count * self.alpha_dim].view(-1, self.input_size, self.distribution_param_count, self.alpha_dim)
+        log_transition = output[:,:,self.distribution_param_count * self.alpha_dim:].view(-1, self.input_size, self.alpha_dim, self.alpha_dim)
+        log_transition = self._normalize_logits(log_transition, dim=-1)
+        #theta = self.net(x).view(-1, self.input_size, self.distribution_param_count, self.alpha_dim)
         if self.distribution == 'binary':
             d = D.Bernoulli(logits=theta)
         elif self.distribution == 'categorical':
@@ -338,7 +333,7 @@ class DARTHMM(nn.Module):
 
         if self.alpha_dim > 1 or True:
             # Multiply with the alpha marginals so that matrix multiplication corresponds to summing out alpha
-            reduction_matrices = log_px_vectors[:,1:] + self.log_transition
+            reduction_matrices = log_px_vectors[:,1:] + log_transition[:,1:]
             log_pxa1 = log_px_vectors[:,0:1] + self.log_p_a1
             reduction_matrices = torch.cat((log_pxa1.repeat(1,1,self.alpha_dim,1), reduction_matrices), 1)
             

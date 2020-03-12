@@ -1,22 +1,22 @@
 import torch
 
-from src.dart import DART
+from src.dart import DART, DARTHMM
 from src.tensor import TT, MPS
 
 dim = 10
+dev = 'cuda'
+d = DART(dim, 10, 2, 1, 'binary').to(dev)
+d2 = DART(dim, 10, 2, 2, 'binary').to(dev)
+d4 = DARTHMM(dim, 10, 2, 4, 'binary').to(dev)
+d100 = DART(dim, 10, 2, 8, 'binary').to(dev)
 
-d = DART(dim, 10, 2, 1, 'binary')
-d2 = DART(dim, 10, 2, 2, 'binary')
-d4 = DART(dim, 10, 2, 4, 'binary')
-d100 = DART(dim, 10, 2, 8, 'binary')
-
-tt4 = TT(dim, 9)
-mps4 = MPS(dim, 9, 2)
+tt4 = TT(dim, 9).to(dev)
+mps4 = MPS(dim, 9, 2).to(dev)
 
 #tt4.sample(10)
 
-X = torch.zeros(2 ** dim, dim)
-idx = torch.arange(2 ** dim)
+X = torch.zeros(2 ** dim, dim).to(dev)
+idx = torch.arange(2 ** dim).to(dev)
 for d_ in range(dim):
     X[(idx // 2 ** d_) % 2 == 0,d_] = 1
 
@@ -27,8 +27,9 @@ print(d100(X)[0].exp().sum())
 print(tt4(X)[0].exp().sum())
 print(mps4(X)[0].exp().sum())
 
-samples = tt4.sample(1000000)
+sample_model = d4
+samples = sample_model.sample(1000000, dev)
 for x in X:
     p_sample = (samples[0] == x).all(-1).float().mean()
-    p_model = tt4(x.unsqueeze(0))[0].exp().squeeze()
+    p_model = sample_model(x.unsqueeze(0))[0].exp().squeeze()
     print(p_sample.item(), p_model.item(), ((p_sample - p_model) / p_model).item())
