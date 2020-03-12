@@ -10,7 +10,7 @@ import time
 
 
 from src.args import get_args
-from src.dart import DART
+from src.dart import DART, DARTHMM
 from src.tensor import TT, MPS
 from src.data import get_data
 
@@ -121,6 +121,8 @@ def run(args: argparse.Namespace):
 
     if args.model == 'dart':
         model = DART(784, args.hidden_size, args.n_hidden, args.alpha_dim, args.distribution, **kwargs)
+    if args.model == 'darthmm':
+        model = DARTHMM(784, args.hidden_size, args.n_hidden, args.alpha_dim, args.distribution, **kwargs)
     elif args.model == 'tt':
         assert args.distribution == 'binary', 'TT model only works with binary variables'
         model = TT(784, args.alpha_dim)
