@@ -1,16 +1,17 @@
 import torch
 
 from src.dart import DART
-from src.tensor import TT
+from src.tensor import TT, MPS
 
 dim = 10
 
 d = DART(dim, 10, 2, 1, 'binary')
 d2 = DART(dim, 10, 2, 2, 'binary')
 d4 = DART(dim, 10, 2, 4, 'binary')
-d100 = DART(dim, 10, 2, 100, 'binary')
+d100 = DART(dim, 10, 2, 8, 'binary')
 
-tt4 = TT(dim, 25)
+tt4 = TT(dim, 9)
+mps4 = MPS(dim, 9, 2)
 
 #tt4.sample(10)
 
@@ -24,6 +25,7 @@ print(d2(X)[0].exp().sum())
 print(d4(X)[0].exp().sum())
 print(d100(X)[0].exp().sum())
 print(tt4(X)[0].exp().sum())
+print(mps4(X)[0].exp().sum())
 
 samples = tt4.sample(1000000)
 for x in X:

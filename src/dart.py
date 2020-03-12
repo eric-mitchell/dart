@@ -51,7 +51,7 @@ class DART(nn.Module):
         elif distribution == 'gaussian':
             self.distribution_param_count = 2
 
-        output_values_per_dim = self.distribution_param_count * alpha_dim ** 2
+        output_values_per_dim = self.distribution_param_count * alpha_dim
 
         # last layer doesn't have nonlinear activation
         self.net += [MaskedLinear(self.hidden_size,
@@ -59,8 +59,8 @@ class DART(nn.Module):
                                   masks[-1].repeat(1,output_values_per_dim).view(-1,self.hidden_size)
         )]
 
-        log_p_alpha = torch.empty(1, self.input_size - 1, 1, alpha_dim).normal_()
-        self.unnormalized_log_p_alpha = torch.nn.Parameter(log_p_alpha)
+        self.u_log_p_a1 = nn.Parameter(torch.empty(1, 1, 1, alpha_dim).normal_())
+        self.u_log_transition_matrices = nn.Parameter(torch.empty(self.input_size - 1, alpha_dim, alpha_dim).normal_())
         
         self.net = nn.Sequential(*self.net)
 
@@ -84,14 +84,21 @@ class DART(nn.Module):
 
         return masks
 
-    def _log_p_alpha(self):
-        u_log_p = self.unnormalized_log_p_alpha
-        max_u = u_log_p.max(-1, keepdim=True).values
-        logsumexp = (u_log_p - max_u).exp().sum(-1, keepdim=True).log()
-        log_p = u_log_p - (max_u + logsumexp)
+    def _normalize_logits(self, unnorm: torch.tensor, dim: int = -1):
+        max_u = unnorm.max(dim, keepdim=True).values
+        logsumexp = (unnorm - max_u).exp().sum(dim, keepdim=True).log()
+        norm = unnorm - (max_u + logsumexp)
 
-        assert ((log_p.exp().sum(-1) - 1).abs() < 1e-6).all()
-        return log_p
+        assert ((norm.exp().sum(dim) - 1).abs() < 1e-5).all()
+        return norm
+        
+    @property
+    def log_p_a1(self):
+        return self._normalize_logits(self.u_log_p_a1)
+
+    @property
+    def log_transition(self):
+        return self._normalize_logits(self.u_log_transition_matrices, dim=-1)
 
     def forward(self, x):
         return self.log_prob(x)
@@ -101,40 +108,47 @@ class DART(nn.Module):
         transform = D.transforms.SigmoidTransform()
         return D.TransformedDistribution(distribution, transform)
 
-    def sample_alphas(self, n: int, device: str = 'cpu'):
-        # Sample random latent "alpha" values
-        # alpha_0 and alpha_n are fixed to have only one possible value, so we hard-code their indices to be zero here
-        # the rest are sampled from our learned mixture prior defined by the logits returned by self._log_p_alpha()
-        # we use these indices in the inner loop to pick which conditional to use at each step
-        alpha_distribution = D.Categorical(logits=self._log_p_alpha().view(self.input_size - 1, self.alpha_dim))
-        zeros = torch.zeros(n,1).long().to(device)
-        alphas = torch.cat((zeros, alpha_distribution.sample((n,)), zeros), 1)
-        return alphas
+    def sample_alphas(self, n: int, device: str = 'cpu', a1: int = None):
+        alphas = []
+        logits = self.log_p_a1.repeat((n,1,1,1))
+        if a1 is not None:
+            logits[:,:,:,a1] = 100
+            if a1 > 0:
+                logits[:,:,:,:a1] = 0
+            if a1 < self.alpha_dim - 1:
+                logits[:,:,:,a1+1:] = 0
+            
+        for idx in range(self.input_size):
+            alpha_d = D.Categorical(logits=logits.squeeze())
+            alphas.append(alpha_d.sample())
+            if idx < self.input_size - 1:
+                logits = self.log_transition.squeeze()[idx,alphas[-1]]
+        return torch.stack(alphas, 1)
 
-    def sample(self, n: int, device: str = 'cpu'):
+    def sample(self, n: int, device: str = 'cpu', a1: int = None):
         """
         Sample n samples from the model.
         """
         with torch.no_grad():
             x = torch.zeros(n, self.input_size).to(device)
 
-            alphas = self.sample_alphas(n, device)
+            alphas = self.sample_alphas(n, device, a1)
             for idx in range(self.input_size):
-                alpha_row, alpha_column = alphas[:,idx], alphas[:,idx+1]
-                theta = self.net(x).view(-1, self.input_size, self.distribution_param_count, *(self.alpha_dim,) * 2)
+                theta = self.net(x).view(-1, self.input_size, self.distribution_param_count, self.alpha_dim)
+                alpha = alphas[:,idx]
                 batch_idx = torch.arange(theta.shape[0]).to(theta.device)
 
                 if self.distribution == 'binary':
-                    beta_logits = theta[batch_idx,idx,0,alpha_row,alpha_column]
+                    beta_logits = theta[batch_idx,idx,0,alpha]
                     d = D.Bernoulli(logits=beta_logits)
                     x[:,idx] = d.sample()
                 elif self.distribution == 'categorical':
-                    category_logits = theta[batch_idx,idx,:,alpha_row,alpha_column]
+                    category_logits = theta[batch_idx,idx,:,alpha]
                     d = D.Categorical(logits=category_logits)
                     x[:,idx] = d.sample().float() / (self.kwargs['categories'] - 1)
                 elif self.distribution == 'gaussian':
-                    mu = theta[batch_idx,idx,0,alpha_row,alpha_column]
-                    std = theta[batch_idx,idx,1,alpha_row,alpha_column].exp()
+                    mu = theta[batch_idx,idx,0,alpha]
+                    std = theta[batch_idx,idx,1,alpha].exp()
                     d = self._sigmoid_gaussian(mu, std)
                     x[:,idx] = d.sample()
 
@@ -147,11 +161,11 @@ class DART(nn.Module):
         """
         Evaluate the log likelihood of a batch of samples.
         """
-        theta = self.net(x).view(-1, self.input_size, self.distribution_param_count, *(self.alpha_dim,) * 2)
+        theta = self.net(x).view(-1, self.input_size, self.distribution_param_count, self.alpha_dim)
         if self.distribution == 'binary':
-            d = D.Bernoulli(logits=theta[:,:,0])
+            d = D.Bernoulli(logits=theta)
         elif self.distribution == 'categorical':
-            d = D.Categorical(logits=theta.permute(0,1,3,4,2)) # We need to permute to put the categories on the last dimension for D.Categorical
+            d = D.Categorical(logits=theta.permute(0,1,3,2)) # We need to permute to put the categories on the last dimension for D.Categorical
         elif self.distribution == 'gaussian':
             mu, std = theta[:,:,0], theta[:,:,1].exp()
             d = self._sigmoid_gaussian(mu, std)
@@ -161,16 +175,17 @@ class DART(nn.Module):
             x = x * (self.kwargs['categories'] - 1)
 
         # Conditional probability matrices log p(x_i | alpha_{i-1}, alpha_i, x_{<i})
-        log_px_matrices = d.log_prob(x.unsqueeze(-1).unsqueeze(-1))
+        log_px_vectors = d.log_prob(x.unsqueeze(-1).unsqueeze(-1))
 
         if self.alpha_dim > 1 or True:
             # Multiply with the alpha marginals so that matrix multiplication corresponds to summing out alpha
-            joint_matrices = log_px_matrices[:,:-1] + self._log_p_alpha()
-
+            reduction_matrices = log_px_vectors[:,1:] + self.log_transition
+            log_pxa1 = log_px_vectors[:,0:1] + self.log_p_a1
+            reduction_matrices = torch.cat((log_pxa1.repeat(1,1,self.alpha_dim,1), reduction_matrices), 1)
+            
             # Reduce all of the "inner" matrices (all except x_1 and x_n)
-            left_reduce_product = reduce(fast_logexpmv, joint_matrices.transpose(0,1))
-            p_xn_g_alpha_n1 = log_px_matrices[:,-1,:,0:1]
-            log_px = fast_logexpmv(left_reduce_product, p_xn_g_alpha_n1)
+            p_x_g_an = reduce(fast_logexpmv, reduction_matrices.transpose(0,1))
+            log_px = p_x_g_an.logsumexp(-1)
         else:
             log_px = log_px_matrices.sum(1).squeeze(-1).squeeze(-1)
 

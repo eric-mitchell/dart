@@ -11,7 +11,7 @@ import time
 
 from src.args import get_args
 from src.dart import DART
-from src.tensor import TT
+from src.tensor import TT, MPS
 from src.data import get_data
 
 
@@ -124,7 +124,9 @@ def run(args: argparse.Namespace):
     elif args.model == 'tt':
         assert args.distribution == 'binary', 'TT model only works with binary variables'
         model = TT(784, args.alpha_dim)
-        
+    elif args.model == 'mps':
+        model = MPS(784, args.alpha_dim, 2)
+
     if args.archive is not None:
         model.load_state_dict(torch.load(args.archive)['model'])
 

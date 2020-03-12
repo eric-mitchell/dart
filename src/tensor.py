@@ -13,6 +13,44 @@ class Tree(nn.Module):
         pass
 
 
+class MPS(nn.Module):
+    def __init__(self, input_size: int, alpha_dim: int = 1, categories: int = 2):
+        super().__init__()
+
+        self.matrices = nn.Parameter(torch.empty(categories, input_size - 2, alpha_dim, alpha_dim).normal_())
+        self.row = nn.Parameter(torch.empty(categories, 1, alpha_dim).normal_())
+        self.column = nn.Parameter(torch.empty(categories, alpha_dim, 1).normal_())
+        self.input_size = input_size
+        self.alpha_dim = alpha_dim
+        self.categories = categories
+
+    def sample(self, n: int = 1, device: str = 'cpu'):
+        return (torch.empty(n, self.input_size).uniform_() * self.categories).floor(), self.matrices
+
+    @property
+    def log_z(self):
+        v = self.column.logsumexp(0, keepdim=True)
+        for idx in range(self.matrices.shape[1]):
+            M = self.matrices[:,-(idx+1)]
+            v = (M + v.permute(0,2,1)).logsumexp(-1, keepdim=True).logsumexp(0, keepdim=True)
+        return (self.row + v.permute(0,2,1)).logsumexp(-1).logsumexp(0)[0]
+
+    def log_prob(self, x):
+        x = x.long()
+        v = self.column[x[:,-1]]
+
+        for idx in range(self.matrices.shape[1]):
+            M = self.matrices[x[:,-(idx + 2)], -(idx + 1)]
+            v = (M + v.permute(0,2,1)).logsumexp(-1, keepdim=True)
+
+        log_p_tilde = (self.row[x[:,0]] + v.permute(0,2,1)).logsumexp(-1)[:,0]
+
+        return log_p_tilde - self.log_z, self.matrices
+
+    def forward(self, x):
+        return self.log_prob(x)
+    
+    
 class TT(nn.Module):
     def __init__(self, input_size: int, alpha_dim: int = 1):
         super().__init__()
@@ -70,16 +108,11 @@ class TT(nn.Module):
         log_px_vectors = d.log_prob(x.unsqueeze(-1).unsqueeze(-1))
         
         # Multiply with the alpha marginals so that matrix multiplication corresponds to summing out alpha
-        #log_px_vectors = torch.cat((log_px_vectors[:,0:1] + self.log_p_a1, log_px_vectors[:,1:]), 1)
-        
         reduction_matrices = log_px_vectors[:,1:] + self.log_transition
         log_pxa1 = log_px_vectors[:,0:1] + self.log_p_a1
         reduction_matrices = torch.cat((log_pxa1.repeat(1,1,self.alpha_dim,1), reduction_matrices), 1)
         
         # Reduce all of the "inner" matrices (all except x_1 and x_n)
-        #left_reduce_product = reduce(fast_logexpmm, reduction_matrices.transpose(0,1))
-        #complete_product = fast_logexpmv(log_px_vectors[:,0], left_reduce_product)
-        #log_px = complete_product.logsumexp(-1)
         p_x_g_an = reduce(fast_logexpmv, reduction_matrices.transpose(0,1))
         log_px = p_x_g_an.logsumexp(-1)
         return log_px, self.log_p_a1
