@@ -21,14 +21,13 @@ class MaskedLinear(nn.Linear):
 class DART(nn.Module):
     """DART based on Masked Autoencoder for Distribution Estimation.
     Gaussian MADE to work with real-valued inputs"""
-    def __init__(self, input_size: int, hidden_size: int, n_hidden: int, alpha_dim: int = 1, distribution: str = 'binary', sampling_order: str = 'sequential', **kwargs):
+    def __init__(self, input_size: int, hidden_size: int, n_hidden: int, alpha_dim: int = 1, distribution: str = 'binary', dropout: bool = False, **kwargs):
         super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.n_hidden = n_hidden
         self.alpha_dim = alpha_dim
         self.distribution = distribution
-        self.sampling_order = sampling_order
         
         masks = self.create_masks()
 
@@ -180,14 +179,13 @@ class DART(nn.Module):
 class DARTHMM(nn.Module):
     """DART based on Masked Autoencoder for Distribution Estimation.
     Gaussian MADE to work with real-valued inputs"""
-    def __init__(self, input_size: int, hidden_size: int, n_hidden: int, alpha_dim: int = 1, distribution: str = 'binary', sampling_order: str = 'sequential', **kwargs):
+    def __init__(self, input_size: int, hidden_size: int, n_hidden: int, alpha_dim: int = 1, distribution: str = 'binary', dropout: bool = False, **kwargs):
         super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.n_hidden = n_hidden
         self.alpha_dim = alpha_dim
         self.distribution = distribution
-        self.sampling_order = sampling_order
         
         masks = self.create_masks()
 
@@ -199,6 +197,8 @@ class DARTHMM(nn.Module):
             self.net += [MaskedLinear(
                 self.hidden_size, self.hidden_size, masks[i+1])]
             self.net += [nn.ReLU(inplace=True)]
+            if dropout:
+                self.net += [nn.Dropout(0.5)]
 
         if distribution == 'binary':
             self.distribution_param_count = 1
@@ -248,7 +248,7 @@ class DARTHMM(nn.Module):
         logsumexp = (unnorm - max_u).exp().sum(dim, keepdim=True).log()
         norm = unnorm - (max_u + logsumexp)
 
-        assert ((norm.exp().sum(dim) - 1).abs() < 1e-5).all()
+        #assert ((norm.exp().sum(dim) - 1).abs() < 1e-4).all(), f'{unnorm.min()}, {unnorm.max()}, {unnorm.mean()}, {unnorm.std()}'
         return norm
         
     @property
@@ -272,7 +272,7 @@ class DARTHMM(nn.Module):
         Sample n samples from the model.
         """
         with torch.no_grad():
-            x = torch.zeros(n, self.input_size).to(device)
+            x = torch.ones(n, self.input_size).to(device) * 1e10
 
             logits = self.log_p_a1.repeat((n,1,1,1))
             alpha = D.Categorical(logits=logits.squeeze()).sample()

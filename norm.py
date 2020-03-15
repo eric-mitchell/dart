@@ -3,11 +3,11 @@ import torch
 from src.dart import DART, DARTHMM
 from src.tensor import TT, MPS
 
-dim = 10
-dev = 'cuda'
+dim = 7
+dev = 'cpu'
 d = DART(dim, 10, 2, 1, 'binary').to(dev)
 d2 = DART(dim, 10, 2, 2, 'binary').to(dev)
-d4 = DARTHMM(dim, 10, 2, 4, 'binary').to(dev)
+d4hmm = DARTHMM(dim, 10, 2, 16, 'binary').to(dev)
 d100 = DART(dim, 10, 2, 8, 'binary').to(dev)
 
 tt4 = TT(dim, 9).to(dev)
@@ -22,12 +22,12 @@ for d_ in range(dim):
 
 print(d(X)[0].exp().sum())
 print(d2(X)[0].exp().sum())
-print(d4(X)[0].exp().sum())
+print(d4hmm(X)[0].exp().sum())
 print(d100(X)[0].exp().sum())
 print(tt4(X)[0].exp().sum())
 print(mps4(X)[0].exp().sum())
 
-sample_model = d4
+sample_model = d4hmm
 samples = sample_model.sample(1000000, dev)
 for x in X:
     p_sample = (samples[0] == x).all(-1).float().mean()

@@ -37,6 +37,7 @@ def train(args: argparse.Namespace, model: DART):
 
     for epoch in range(args.epochs):
         for t, (X, y) in enumerate(train_loader):
+            model.train()
             if t == 1:
                 start = time.time()
 
@@ -66,6 +67,7 @@ def train(args: argparse.Namespace, model: DART):
             writer.add_scalar('Train_Likelihood', log_px.mean().item(), step)
 
             if step % args.vis_interval == 0:
+                model.eval()
                 # Grab just one random test data batch
                 for test_data, _ in test_loader:
                     test_data = test_data.view(test_data.shape[0], -1).to(device)
@@ -120,9 +122,9 @@ def run(args: argparse.Namespace):
         kwargs['categories'] = 256
 
     if args.model == 'dart':
-        model = DART(784, args.hidden_size, args.n_hidden, args.alpha_dim, args.distribution, **kwargs)
+        model = DART(784, args.hidden_size, args.n_hidden, args.alpha_dim, args.distribution, dropout=args.dropout, **kwargs)
     if args.model == 'darthmm':
-        model = DARTHMM(784, args.hidden_size, args.n_hidden, args.alpha_dim, args.distribution, **kwargs)
+        model = DARTHMM(784, args.hidden_size, args.n_hidden, args.alpha_dim, args.distribution, dropout=args.dropout, **kwargs)
     elif args.model == 'tt':
         assert args.distribution == 'binary', 'TT model only works with binary variables'
         model = TT(784, args.alpha_dim)
