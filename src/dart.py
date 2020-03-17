@@ -217,9 +217,6 @@ class DARTHMM(nn.Module):
                                   self.input_size * output_values_per_dim,
                                   masks[-1].repeat(1,output_values_per_dim).view(-1,self.hidden_size)
         )]
-
-        self.u_log_p_a1 = nn.Parameter(torch.empty(1, 1, 1, alpha_dim).normal_())
-        #self.u_log_transition_matrices = nn.Parameter(torch.empty(self.input_size - 1, alpha_dim, alpha_dim).normal_())
         
         self.net = nn.Sequential(*self.net)
 
@@ -244,20 +241,16 @@ class DARTHMM(nn.Module):
         return masks
 
     def _normalize_logits(self, unnorm: torch.tensor, dim: int = -1):
+        unnorm = unnorm.clamp(-100,100)
+        
         max_u = unnorm.max(dim, keepdim=True).values
         logsumexp = (unnorm - max_u).exp().sum(dim, keepdim=True).log()
         norm = unnorm - (max_u + logsumexp)
 
-        #assert ((norm.exp().sum(dim) - 1).abs() < 1e-4).all(), f'{unnorm.min()}, {unnorm.max()}, {unnorm.mean()}, {unnorm.std()}'
+        if not ((norm.exp().sum(dim) - 1).abs() < 1e-5).all():
+            import pdb; pdb.set_trace()
+        assert ((norm.exp().sum(dim) - 1).abs() < 1e-5).all(), f'{unnorm.min()}, {unnorm.max()}, {unnorm.mean()}, {unnorm.std()}'
         return norm
-        
-    @property
-    def log_p_a1(self):
-        return self._normalize_logits(self.u_log_p_a1)
-
-    @property
-    def log_transition(self):
-        return self._normalize_logits(self.u_log_transition_matrices, dim=-1)
 
     def forward(self, x):
         return self.log_prob(x)
@@ -267,26 +260,22 @@ class DARTHMM(nn.Module):
         transform = D.transforms.SigmoidTransform()
         return D.TransformedDistribution(distribution, transform)
 
-    def sample(self, n: int, device: str = 'cpu', a1: int = None):
+    def sample(self, n: int, device: str = 'cpu'):
         """
         Sample n samples from the model.
         """
         with torch.no_grad():
-            x = torch.ones(n, self.input_size).to(device) * 1e10
+            x = torch.zeros(n, self.input_size).to(device)
 
-            logits = self.log_p_a1.repeat((n,1,1,1))
-            alpha = D.Categorical(logits=logits.squeeze()).sample()
+            alpha = 0
             for idx in range(self.input_size):
                 output = self.net(x).view(-1, self.input_size, self.distribution_param_count * self.alpha_dim + self.alpha_dim ** 2)
                 theta = output[:,:,:self.distribution_param_count * self.alpha_dim].view(-1, self.input_size, self.distribution_param_count, self.alpha_dim)
-                if idx > 0:
-                    log_transition = output[:,:,self.distribution_param_count * self.alpha_dim:].view(-1, self.input_size, self.alpha_dim, self.alpha_dim)
-                    log_transition = self._normalize_logits(log_transition, dim=-1)
-                    batch_idx = torch.arange(log_transition.shape[0], device=log_transition.device)
-                    logits = log_transition[batch_idx,idx,alpha]
-                    alpha = D.Categorical(logits=logits.squeeze()).sample()
-
-                batch_idx = torch.arange(theta.shape[0]).to(theta.device)
+                log_transition = self._normalize_logits(output[:,:,self.distribution_param_count * self.alpha_dim:].view(-1, self.input_size, self.alpha_dim, self.alpha_dim),
+                                                        dim=-1)
+                batch_idx = torch.arange(log_transition.shape[0], device=log_transition.device)
+                logits = log_transition[batch_idx,idx,alpha]
+                alpha = D.Categorical(logits=logits.squeeze()).sample()
 
                 if self.distribution == 'binary':
                     beta_logits = theta[batch_idx,idx,0,alpha]
@@ -315,7 +304,7 @@ class DARTHMM(nn.Module):
         theta = output[:,:,:self.distribution_param_count * self.alpha_dim].view(-1, self.input_size, self.distribution_param_count, self.alpha_dim)
         log_transition = output[:,:,self.distribution_param_count * self.alpha_dim:].view(-1, self.input_size, self.alpha_dim, self.alpha_dim)
         log_transition = self._normalize_logits(log_transition, dim=-1)
-        #theta = self.net(x).view(-1, self.input_size, self.distribution_param_count, self.alpha_dim)
+
         if self.distribution == 'binary':
             d = D.Bernoulli(logits=theta)
         elif self.distribution == 'categorical':
@@ -333,9 +322,7 @@ class DARTHMM(nn.Module):
 
         if self.alpha_dim > 1 or True:
             # Multiply with the alpha marginals so that matrix multiplication corresponds to summing out alpha
-            reduction_matrices = log_px_vectors[:,1:] + log_transition[:,1:]
-            log_pxa1 = log_px_vectors[:,0:1] + self.log_p_a1
-            reduction_matrices = torch.cat((log_pxa1.repeat(1,1,self.alpha_dim,1), reduction_matrices), 1)
+            reduction_matrices = log_px_vectors + log_transition
             
             # Reduce all of the "inner" matrices (all except x_1 and x_n)
             p_x_g_an = reduce(fast_logexpmv, reduction_matrices.transpose(0,1))

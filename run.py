@@ -61,7 +61,7 @@ def train(args: argparse.Namespace, model: DART):
             optimizer.zero_grad()
 
             avg_time = 0 if t == 0 else (time.time() - start) / t
-            print(f'Epoch: {epoch}\tStep: {step}\tlog_px: {log_px.mean().item():#.6g}\t{avg_time:#.6g}\r', end='')
+            print(f'Epoch: {epoch}\tStep: {step}\tlog_px: {log_px.mean().item():#.6g}\t{avg_time:#.6g}\t{matrices.max()}\t{matrices.mean()}\r', end='')
 
             writer.add_scalar('Grad', grad, step)
             writer.add_scalar('Train_Likelihood', log_px.mean().item(), step)
