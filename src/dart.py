@@ -274,9 +274,12 @@ class DARTHMM(nn.Module):
                 log_transition = self._normalize_logits(output[:,:,self.distribution_param_count * self.alpha_dim:].view(-1, self.input_size, self.alpha_dim, self.alpha_dim),
                                                         dim=-1)
                 batch_idx = torch.arange(log_transition.shape[0], device=log_transition.device)
-                logits = log_transition[batch_idx,idx,alpha]
-                alpha = D.Categorical(logits=logits.squeeze()).sample()
-
+                if self.alpha_dim > 1:
+                    logits = log_transition[batch_idx,idx,alpha]
+                    alpha = D.Categorical(logits=logits.squeeze()).sample()
+                else:
+                    alpha = 0
+                
                 if self.distribution == 'binary':
                     beta_logits = theta[batch_idx,idx,0,alpha]
                     d = D.Bernoulli(logits=beta_logits)
